@@ -18,11 +18,25 @@
         android:id="@+id/droneStatus" />
 
     <TextView
-        android:text="TextView"
+        android:text="Data"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_below="@+id/droneStatus"
         android:layout_alignParentStart="true"
         android:layout_marginTop="23dp"
         android:id="@+id/lastPacket" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_below="@+id/lastPacket"
+        android:layout_alignParentStart="true"
+        android:layout_marginTop="24dp">
+
+        <TextView
+            android:text="Debug"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:id="@+id/debug" />
+    </ScrollView>
 </RelativeLayout>

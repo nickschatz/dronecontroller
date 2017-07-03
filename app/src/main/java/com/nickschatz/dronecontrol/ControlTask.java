@@ -2,12 +2,15 @@ package com.nickschatz.dronecontrol;
 
 import android.os.AsyncTask;
 import android.util.Log;
+import android.widget.TextView;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.nio.ByteBuffer;
 import java.util.Collections;
+import java.util.LinkedList;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
@@ -23,6 +26,7 @@ public class ControlTask extends AsyncTask<Object, Byte, Void> {
 
     public ControlTask(MainActivity ente) {
         ctrlData = new ConcurrentLinkedQueue<>();
+        recvQueue = new LinkedList<>();
         this.main = ente;
     }
 
@@ -54,6 +58,7 @@ public class ControlTask extends AsyncTask<Object, Byte, Void> {
                 while (input.available() > 0) {
                     recvQueue.add((byte) input.read());
                 }
+                print(recvQueue);
                 Thread.sleep(50);
             }
             input.close();
@@ -64,6 +69,14 @@ public class ControlTask extends AsyncTask<Object, Byte, Void> {
         }
 
         return null;
+    }
+
+    private void print(Queue<Byte> recvQueue) {
+        ByteBuffer buf = ByteBuffer.allocate(recvQueue.size());
+        while (!recvQueue.isEmpty()) {
+            buf.put(recvQueue.remove());
+        }
+        main.print(new String(buf.array()));
     }
 
     public void updateControl(ControlPacket ctrl) {

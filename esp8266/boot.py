@@ -14,9 +14,9 @@ wlan.connect(secure.SSID, secure.wifi_pass) # connect to an AP
 wait = 30
 count = 0
 while not wlan.isconnected() and count < wait:
-    print(".", end="")
+    # print(".", end="")
     count += 1
     time.sleep(1)
 
 
-print("IP: {}".format(wlan.ifconfig()[0]))
+# print("IP: {}".format(wlan.ifconfig()[0]))
