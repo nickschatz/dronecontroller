@@ -69,7 +69,7 @@ void setup() {
   byte id = myIMU.readByte(MPU9250_ADDRESS, WHO_AM_I_MPU9250);
   if (id != 0x71) {
     Serial.println(F("Failed to connect to MPU9250"));
-    return;
+    while (1);
   }
   
   Serial.println(F("Connected to IMU"));
@@ -167,21 +167,33 @@ void setup() {
 }
 
 
-#define YAW_P 0.0
-#define PITCH_P 0.005
-#define ROLL_P 0.005
-
+#define YAW_P 0.000
+#define YAW_I 0.000
 #define YAW_D 0.0
+
+#define PITCH_P 0.000
+#define PITCH_I 0.000
 #define PITCH_D 0.0
-#define ROLL_D 0.0
+
+#define ROLL_P 0.0020
+#define ROLL_I 0.0002
+#define ROLL_D -0.0005
 
 float yaw_err_last = 0;
 float pitch_err_last = 0;
 float roll_err_last = 0;
+
+float yaw_err_accum = 0;
+float pitch_err_accum = 0;
+float roll_err_accum = 0;
 struct vec3e calc_pid(struct vec3e error) {
-  float yaw_output = error.yaw * YAW_P + (error.yaw - yaw_err_last) * YAW_D / dt;
-  float pitch_output = error.pitch * PITCH_P + (error.pitch - pitch_err_last) * PITCH_D / dt;
-  float roll_output = error.roll * ROLL_P + (error.roll - roll_err_last) * ROLL_D / dt;
+  yaw_err_accum += error.yaw * dt;
+  pitch_err_accum += error.pitch * dt;
+  roll_err_accum += error.roll * dt;
+  
+  float yaw_output = error.yaw * YAW_P + yaw_err_accum * YAW_I + (error.yaw - yaw_err_last) * YAW_D / dt;
+  float pitch_output = error.pitch * PITCH_P + pitch_err_accum * PITCH_I + (error.pitch - pitch_err_last) * PITCH_D / dt;
+  float roll_output = error.roll * ROLL_P + roll_err_accum * ROLL_I + (error.roll - roll_err_last) * ROLL_D / dt;
   yaw_err_last = error.yaw;
   pitch_err_last = error.pitch;
   roll_err_last = error.roll;
@@ -272,16 +284,16 @@ void update_imu() {
   // along the x-axis just like in the LSM9DS0 sensor. This rotation can be
   // modified to allow any convenient orientation convention. This is ok by
   // aircraft orientation standards! Pass gyro rate as rad/s
-//  MadgwickQuaternionUpdate(ax, ay, az, gx*PI/180.0f, gy*PI/180.0f, gz*PI/180.0f,  my,  mx, mz);
-  MahonyQuaternionUpdate(myIMU.ax, myIMU.ay, myIMU.az, myIMU.gx*DEG_TO_RAD,
+  MadgwickQuaternionUpdate(myIMU.ax, myIMU.ay, myIMU.az, myIMU.gx*PI/180.0f, myIMU.gy*PI/180.0f, myIMU.gz*PI/180.0f,  myIMU.my, myIMU.mx, myIMU.mz, myIMU.deltat);
+  /*MahonyQuaternionUpdate(myIMU.ax, myIMU.ay, myIMU.az, myIMU.gx*DEG_TO_RAD,
                          myIMU.gy*DEG_TO_RAD, myIMU.gz*DEG_TO_RAD, myIMU.my,
-                         myIMU.mx, myIMU.mz, myIMU.deltat);
+                         myIMU.mx, myIMU.mz, myIMU.deltat);*/
   
   // Serial print and/or display at 0.5 s rate independent of data rates
   myIMU.delt_t = millis() - myIMU.count;
 
-  // update ypr at 50Hz
-  if (myIMU.delt_t > 20)
+  // update ypr at 200Hz
+  if (myIMU.delt_t > 5)
   {
 
 // Define output variables from updated quaternion---these are Tait-Bryan
@@ -350,22 +362,17 @@ void loop() {
     roll = 0;
   }
   if (now - last_debug > 500) {
-      Serial.print(F("Pitch: "));
-      Serial.print(myIMU.pitch);
-      Serial.print(F(" Error: "));
-      Serial.println(error.pitch);
-      Serial.print(F("Roll: "));
-      Serial.print(myIMU.roll);
-      Serial.print(F(" Error: "));
-      Serial.println(error.roll);
-      Serial.print(1000.0 / delta); Serial.println(F(" hz"));
+      Serial.print(F("Roll Error: "));
+      Serial.print(error.roll);
+      Serial.print(F(" Gain: "));
+      Serial.println(100 * roll);
       last_debug = now;
     }
   
-  int fr = power_to_us(clamp_power(throttle - pitch + yaw));
-  int fl = power_to_us(clamp_power(throttle - roll - yaw));
-  int rl = power_to_us(clamp_power(throttle + pitch + yaw));
-  int rr = power_to_us(clamp_power(throttle + roll - yaw));
+  int fr = power_to_us(clamp_power(throttle - pitch - roll));
+  int fl = power_to_us(clamp_power(throttle - pitch + roll));
+  int rl = power_to_us(clamp_power(throttle + pitch + roll));
+  int rr = power_to_us(clamp_power(throttle + pitch - roll));
 
   if (millis() - last_packet < 500) {
     esc1.writeMicroseconds(fr);
