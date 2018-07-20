@@ -9,6 +9,8 @@
 
 #define STATUS_LED A0
 #define CAL_COUNTS 50
+#define MIN_THROTTLE 0.2
+#define TETHER_CMD 1
 
 struct vec3 {
   float x;
@@ -22,7 +24,7 @@ struct vec3e {
   float roll;
 };
 
-struct motors {
+typedef struct motors {
   float fr;
   float fl;
   float rl;
@@ -175,8 +177,8 @@ void setup() {
 #define PITCH_I 0.000
 #define PITCH_D 0.0
 
-#define ROLL_P 0.0020
-#define ROLL_I 0.0002
+#define ROLL_P 0.0080
+#define ROLL_I 0.0000
 #define ROLL_D -0.0005
 
 float yaw_err_last = 0;
@@ -336,6 +338,38 @@ void update_imu() {
 }
 
 
+void desaturate(struct motors *pows) {
+  // Rescale all to [min(pows), max(pows)]
+
+  // If all zeroes, then stop because we don't want constant spinning
+  if (pows->fr == 0.0 && pows->fl == 0.0 && pows->rl == 0.0 && pows->rr == 0.0) {
+    return;
+  }
+  float minpow = min(pows->fr, min(pows->fl, min(pows->rl, pows->rr)));
+  float maxpow = max(pows->fr, max(pows->fl, max(pows->rl, pows->rr)));
+  // No need to do anything if it's already in acceptable range
+  if (maxpow <= 1.0 && minpow >= MIN_THROTTLE) {
+    return;
+  }
+  
+  float d = maxpow - minpow;
+  // Scale to between 0 and 1
+  pows->fr = (pows->fr - minpow) / d;
+  pows->fl = (pows->fl - minpow) / d;
+  pows->rl = (pows->rl - minpow) / d;
+  pows->rr = (pows->rr - minpow) / d;
+
+  // Rescale to min and max
+  float min_ = max(minpow, MIN_THROTTLE);
+  float max_ = min(maxpow, 1.0);
+  float d2 = max_ - min_;
+  pows->fr = pows->fr * d2 + min_;
+  pows->fl = pows->fl * d2 + min_;
+  pows->rl = pows->rl * d2 + min_;
+  pows->rr = pows->rr * d2 + min_;
+}
+
+
 long last_packet = 0;
 long last_debug = 0;
 
@@ -348,54 +382,38 @@ void loop() {
   dt = (float) delta / 1000.0;
   
   update_imu();
-  
-  struct vec3e error = {myIMU.yaw - desired_angle.yaw, myIMU.pitch - desired_angle.pitch, myIMU.roll - desired_angle.roll};
-  struct vec3e controller_output = calc_pid(error);
 
-  float yaw = controller_output.yaw;
-  float pitch = controller_output.pitch;
-  float roll = controller_output.roll;
+  bool has_data = false;
+  int8_t in_yaw;
+  int8_t in_pitch;
+  int8_t in_roll;
+  int8_t in_throttle;
+  int8_t special;
 
-  if (throttle == 0.0) {
-    yaw = 0;
-    pitch = 0;
-    roll = 0;
+  #if TETHER_CMD
+  if (Serial.available() >= 5) {
+    last_packet = millis();
+    in_yaw = Serial.read();
+    in_pitch = Serial.read();
+    in_roll = Serial.read();
+    in_throttle = Serial.read();
+    special = Serial.read();
+    has_data = true;
   }
-  if (now - last_debug > 500) {
-      Serial.print(F("Roll Error: "));
-      Serial.print(error.roll);
-      Serial.print(F(" Gain: "));
-      Serial.println(100 * roll);
-      last_debug = now;
-    }
-  
-  int fr = power_to_us(clamp_power(throttle - pitch - roll));
-  int fl = power_to_us(clamp_power(throttle - pitch + roll));
-  int rl = power_to_us(clamp_power(throttle + pitch + roll));
-  int rr = power_to_us(clamp_power(throttle + pitch - roll));
-
-  if (millis() - last_packet < 500) {
-    esc1.writeMicroseconds(fr);
-    esc2.writeMicroseconds(fl);
-    esc3.writeMicroseconds(rl);
-    esc4.writeMicroseconds(rr);
-  }
-  else {
-    esc1.writeMicroseconds(1060);
-    esc2.writeMicroseconds(1060);
-    esc3.writeMicroseconds(1060);
-    esc4.writeMicroseconds(1060);
-  }
-  
+  #else
   if (mySerial.available() >= 5) {
     last_packet = millis();
+    in_yaw = mySerial.read();
+    in_pitch = mySerial.read();
+    in_roll = mySerial.read();
+    in_throttle = mySerial.read();
+    special = mySerial.read();
+    has_data = true;
+  }
+  #endif
+  if (has_data) {
     
-    int8_t in_yaw = mySerial.read();
-    int8_t in_pitch = mySerial.read();
-    int8_t in_roll = mySerial.read();
-    int8_t in_throttle = mySerial.read();
-    int8_t special = mySerial.read();
-    if (abs(in_throttle) < 10) {
+    if (abs(in_throttle) < 20) {
       in_throttle = 0;
     }
     if (abs(in_pitch) < 10) {
@@ -415,6 +433,52 @@ void loop() {
     desired_angle.yaw += yaw;
     desired_angle.roll = roll;
     desired_angle.pitch = pitch;
+  }
+  
+  struct vec3e error = {myIMU.yaw - desired_angle.yaw, myIMU.pitch - desired_angle.pitch, myIMU.roll - desired_angle.roll};
+  struct vec3e controller_output = calc_pid(error);
+
+  float yaw = controller_output.yaw;
+  float pitch = controller_output.pitch;
+  float roll = controller_output.roll;
+
+  if (throttle == 0.0) {
+    yaw = 0;
+    pitch = 0;
+    roll = 0;
+  }
+  if (now - last_debug > 500) {
+    Serial.print(F("Throttle: "));
+    Serial.print(throttle);
+    Serial.print(F(" Roll Error: "));
+    Serial.print(error.roll);
+    Serial.print(F(" Gain: "));
+    Serial.println(100 * roll);
+    last_debug = now;
+  }
+
+  struct motors pows = {throttle - pitch - roll, 
+                        throttle - pitch + roll,
+                        throttle + pitch + roll,
+                        throttle + pitch - roll};
+  desaturate(&pows);
+  
+  int fr = power_to_us(pows.fr);
+  int fl = power_to_us(pows.fl);
+  int rl = power_to_us(pows.rl);
+  int rr = power_to_us(pows.rr);
+
+  if (millis() - last_packet < 500) {
+    esc1.writeMicroseconds(fr);
+    esc2.writeMicroseconds(fl);
+    esc3.writeMicroseconds(rl);
+    esc4.writeMicroseconds(rr);
+  }
+  else {
+    esc1.writeMicroseconds(1060);
+    esc2.writeMicroseconds(1060);
+    esc3.writeMicroseconds(1060);
+    esc4.writeMicroseconds(1060);
   }
   
 }
