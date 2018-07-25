@@ -8,9 +8,14 @@
 #include <SoftwareSerial.h>
 
 #define STATUS_LED A0
+#define VIN_READ A1
 #define CAL_COUNTS 50
 #define MIN_THROTTLE 0.2
 #define TETHER_CMD 1
+// 20 / 1023 * 12.50 / 11.71
+// Small fudge for variances in resistors
+#define VOLTAGE_SCALE 0.020869 
+#define STOP -128
 
 struct vec3 {
   float x;
@@ -51,6 +56,7 @@ SoftwareSerial mySerial(2, 3); // RX, TX
 
 //Max safe speed is 50%
 void setup() {
+  pinMode(VIN_READ, INPUT);
   pinMode(STATUS_LED, OUTPUT);
   digitalWrite(STATUS_LED, LOW);
   Serial.begin(230400);
@@ -168,6 +174,15 @@ void setup() {
   last_intr = millis();
 }
 
+float sgn(float x) {
+  if (x < 0) return -1.0;
+  if (x == 0) return 0.0;
+  return 1.0;
+}
+
+float clamp(float sig, float cutoff) {
+  return min(max(-cutoff, sig), cutoff);
+}
 
 #define YAW_P 0.000
 #define YAW_I 0.000
@@ -177,9 +192,9 @@ void setup() {
 #define PITCH_I 0.000
 #define PITCH_D 0.0
 
-#define ROLL_P 0.0080
+#define ROLL_P 0.0050
 #define ROLL_I 0.0000
-#define ROLL_D -0.0005
+#define ROLL_D 0.0050
 
 float yaw_err_last = 0;
 float pitch_err_last = 0;
@@ -195,7 +210,7 @@ struct vec3e calc_pid(struct vec3e error) {
   
   float yaw_output = error.yaw * YAW_P + yaw_err_accum * YAW_I + (error.yaw - yaw_err_last) * YAW_D / dt;
   float pitch_output = error.pitch * PITCH_P + pitch_err_accum * PITCH_I + (error.pitch - pitch_err_last) * PITCH_D / dt;
-  float roll_output = error.roll * ROLL_P + roll_err_accum * ROLL_I + (error.roll - roll_err_last) * ROLL_D / dt;
+  float roll_output = error.roll * ROLL_P + roll_err_accum * ROLL_I + clamp((error.roll - roll_err_last) / dt, 100) * ROLL_D ;
   yaw_err_last = error.yaw;
   pitch_err_last = error.pitch;
   roll_err_last = error.roll;
@@ -324,8 +339,6 @@ void update_imu() {
                   - *(getQ()+2) * *(getQ()+2) + *(getQ()+3) * *(getQ()+3));
     myIMU.pitch *= RAD_TO_DEG;
     myIMU.yaw   *= RAD_TO_DEG;
-    // Declination of SparkFun Electronics (40°05'26.6"N 105°11'05.9"W) is
-    //    8° 30' E  ± 0° 21' (or 8.5°) on 2016-07-19
     // - http://www.ngdc.noaa.gov/geomag-web/#declination
     myIMU.yaw   -= 0.2167;
     myIMU.roll  *= RAD_TO_DEG;
@@ -369,6 +382,63 @@ void desaturate(struct motors *pows) {
   pows->rr = pows->rr * d2 + min_;
 }
 
+bool is_low_voltage() {
+  float vin = ((float) analogRead(VIN_READ)) * VOLTAGE_SCALE;
+  if (vin < 8.0) {
+    // Either this LiPo is totally screwed or you're on USB power
+    return false;
+  }
+  else {
+    return vin < 10.0;
+  }
+}
+
+void decr(byte* i) {
+  if (*i == 0) {
+    *i = 5;
+  }
+  (*i)--;
+}
+
+int8_t* read_buf = new int8_t[6];
+bool serial_read(int8_t* in_yaw, int8_t* in_pitch, int8_t* in_roll, int8_t* in_throttle, int8_t* special) {
+  #if TETHER_CMD
+  if (Serial.available() < 6) {
+  #else
+  if (mySerial.available() < 6) {
+  #endif
+    return false;
+  }
+  // Read bytes until the last one read is STOP and I've read at least 6 total
+  byte count = 0;
+  byte buf_ptr = 0;
+  byte last_read = 0;
+  while (count < 6 && last_read != STOP) {
+    #if TETHER_CMD
+    last_read = Serial.read();
+    #else
+    last_read = mySerial.read();
+    #endif
+    
+    read_buf[buf_ptr] = last_read;
+    count++;
+    buf_ptr = (buf_ptr + 1) % 6;
+  }
+  buf_ptr = (buf_ptr + 3) % 6;
+  // Read forwards
+  *in_yaw = read_buf[buf_ptr];
+  buf_ptr = (buf_ptr + 1) % 6;
+  *in_pitch = read_buf[buf_ptr];
+  buf_ptr = (buf_ptr + 1) % 6;
+  *in_roll = read_buf[buf_ptr];
+  buf_ptr = (buf_ptr + 1) % 6;
+  *in_throttle = read_buf[buf_ptr];
+  buf_ptr = (buf_ptr + 1) % 6;
+  *special = read_buf[buf_ptr];
+  
+  return true;
+}
+
 
 long last_packet = 0;
 long last_debug = 0;
@@ -383,36 +453,25 @@ void loop() {
   
   update_imu();
 
-  bool has_data = false;
+  
   int8_t in_yaw;
   int8_t in_pitch;
   int8_t in_roll;
   int8_t in_throttle;
   int8_t special;
+  bool has_data = serial_read(&in_yaw, &in_pitch, &in_roll, &in_throttle, &special);
 
-  #if TETHER_CMD
-  if (Serial.available() >= 5) {
-    last_packet = millis();
-    in_yaw = Serial.read();
-    in_pitch = Serial.read();
-    in_roll = Serial.read();
-    in_throttle = Serial.read();
-    special = Serial.read();
-    has_data = true;
-  }
-  #else
-  if (mySerial.available() >= 5) {
-    last_packet = millis();
-    in_yaw = mySerial.read();
-    in_pitch = mySerial.read();
-    in_roll = mySerial.read();
-    in_throttle = mySerial.read();
-    special = mySerial.read();
-    has_data = true;
-  }
-  #endif
   if (has_data) {
-    
+    last_packet = millis();
+    /*Serial.print(in_yaw);
+    Serial.print(F(" P: "));
+    Serial.print(in_pitch);
+    Serial.print(F(" R: "));
+    Serial.print(in_roll);
+    Serial.print(F(" T: "));
+    Serial.print(in_throttle);
+    Serial.print(F(" S: "));
+    Serial.println(special);*/
     if (abs(in_throttle) < 20) {
       in_throttle = 0;
     }
@@ -453,7 +512,12 @@ void loop() {
     Serial.print(F(" Roll Error: "));
     Serial.print(error.roll);
     Serial.print(F(" Gain: "));
-    Serial.println(100 * roll);
+    Serial.print(100 * roll);
+    Serial.print(F(" dt: "));
+    Serial.println(delta);
+    if (is_low_voltage()) {
+      Serial.println("!!! LOW VOLTAGE !!!");
+    }
     last_debug = now;
   }
 

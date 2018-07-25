@@ -1,3 +1,5 @@
+#!/usr/bin/python
+
 import pygame, serial, os
 
 
@@ -18,7 +20,7 @@ pygame.joystick.init()
 _joystick = pygame.joystick.Joystick(0)
 _joystick.init()
 
-wport = serial.Serial("/dev/ttyACM1", 230400)
+wport = serial.Serial("/dev/ttyACM0", 230400)
 wport.timeout = 0
 #wport.open()
 # Main event loop
@@ -27,18 +29,20 @@ while True:
     pygame.event.get()
     x = _joystick.get_axis(0)
     y = _joystick.get_axis(1)
-    rx = _joystick.get_axis(2)
-    ry = _joystick.get_axis(3)
+    ry = _joystick.get_axis(4)
+    rx = _joystick.get_axis(3)
+    reset = 1 if _joystick.get_button(7) else 0
 
     
     yaw = int(127 * x)
     pitch = int(127 * ry)
     roll = int(127 * rx)
     throttle = int(127 * y)
+    special = 0 | reset
     
     if ready:
-        data = b''.join(map(lambda d: d.to_bytes(1, "big", signed=True), [yaw, pitch, roll, throttle, 0]))
-        assert len(data) == 5
+        data = b''.join(map(lambda d: d.to_bytes(1, "big", signed=True), [yaw, pitch, roll, throttle, special, -128]))
+        assert len(data) == 6
         wport.write(data)
 
     resp = wport.readline().decode("U8")
@@ -46,5 +50,3 @@ while True:
         if resp == "READY\r\n":
             ready = True
         print(resp, end="")
-        if ready:
-            print("yaw: {}  pitch: {} roll: {} throttle: {}".format(yaw, pitch, roll, throttle))
