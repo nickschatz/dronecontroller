@@ -2,8 +2,6 @@
 #include "quaternionFilters.h"
 
 #include <SPI.h>
-#include <Firmata.h>
-#include <Boards.h>
 #include <Servo.h>
 #include <SoftwareSerial.h>
 
@@ -15,7 +13,7 @@
 // 20 / 1023 * 12.50 / 11.71
 // Small fudge for variances in resistors
 #define VOLTAGE_SCALE 0.020869 
-#define STOP -128
+#define STOP 255
 
 struct vec3 {
   float x;
@@ -27,6 +25,15 @@ struct vec3e {
   float yaw;
   float pitch;
   float roll;
+};
+
+struct state {
+  float y;
+  float p;
+  float r;
+  float yd;
+  float pd;
+  float rd;
 };
 
 typedef struct motors {
@@ -184,45 +191,6 @@ float clamp(float sig, float cutoff) {
   return min(max(-cutoff, sig), cutoff);
 }
 
-#define YAW_P 0.000
-#define YAW_I 0.000
-#define YAW_D 0.0
-
-#define PITCH_P 0.000
-#define PITCH_I 0.000
-#define PITCH_D 0.0
-
-#define ROLL_P 0.0050
-#define ROLL_I 0.0000
-#define ROLL_D 0.0050
-
-float yaw_err_last = 0;
-float pitch_err_last = 0;
-float roll_err_last = 0;
-
-float yaw_err_accum = 0;
-float pitch_err_accum = 0;
-float roll_err_accum = 0;
-struct vec3e calc_pid(struct vec3e error) {
-  yaw_err_accum += error.yaw * dt;
-  pitch_err_accum += error.pitch * dt;
-  roll_err_accum += error.roll * dt;
-  
-  float yaw_output = error.yaw * YAW_P + yaw_err_accum * YAW_I + (error.yaw - yaw_err_last) * YAW_D / dt;
-  float pitch_output = error.pitch * PITCH_P + pitch_err_accum * PITCH_I + (error.pitch - pitch_err_last) * PITCH_D / dt;
-  float roll_output = error.roll * ROLL_P + roll_err_accum * ROLL_I + clamp((error.roll - roll_err_last) / dt, 100) * ROLL_D ;
-  yaw_err_last = error.yaw;
-  pitch_err_last = error.pitch;
-  roll_err_last = error.roll;
-  
-  struct vec3e output = {yaw_output, pitch_output, roll_output};
-  return output;
-}
-
-float clamp_power(float power) {
-  return min(max(power, 0.0), 1.0);
-}
-
 int power_to_us(float power) {
   if (power > 1) {
     power = 1;
@@ -301,7 +269,7 @@ void update_imu() {
   // along the x-axis just like in the LSM9DS0 sensor. This rotation can be
   // modified to allow any convenient orientation convention. This is ok by
   // aircraft orientation standards! Pass gyro rate as rad/s
-  MadgwickQuaternionUpdate(myIMU.ax, myIMU.ay, myIMU.az, myIMU.gx*PI/180.0f, myIMU.gy*PI/180.0f, myIMU.gz*PI/180.0f,  myIMU.my, myIMU.mx, myIMU.mz, myIMU.deltat);
+  
   /*MahonyQuaternionUpdate(myIMU.ax, myIMU.ay, myIMU.az, myIMU.gx*DEG_TO_RAD,
                          myIMU.gy*DEG_TO_RAD, myIMU.gz*DEG_TO_RAD, myIMU.my,
                          myIMU.mx, myIMU.mz, myIMU.deltat);*/
@@ -312,6 +280,7 @@ void update_imu() {
   // update ypr at 200Hz
   if (myIMU.delt_t > 5)
   {
+    MadgwickQuaternionUpdate(myIMU.ax, myIMU.ay, myIMU.az, myIMU.gx*PI/180.0f, myIMU.gy*PI/180.0f, myIMU.gz*PI/180.0f,  myIMU.my, myIMU.mx, myIMU.mz, myIMU.deltat);
 
 // Define output variables from updated quaternion---these are Tait-Bryan
 // angles, commonly used in aircraft orientation. In this coordinate system,
@@ -402,29 +371,27 @@ void decr(byte* i) {
 
 int8_t* read_buf = new int8_t[6];
 bool serial_read(int8_t* in_yaw, int8_t* in_pitch, int8_t* in_roll, int8_t* in_throttle, int8_t* special) {
+  
   #if TETHER_CMD
-  if (Serial.available() < 6) {
+  #define SERIAL Serial
   #else
-  if (mySerial.available() < 6) {
+  #define SERIAL mySerial
   #endif
+  if (SERIAL.available() < 6) {
     return false;
   }
   // Read bytes until the last one read is STOP and I've read at least 6 total
-  byte count = 0;
+  unsigned long count = 0;
   byte buf_ptr = 0;
   byte last_read = 0;
-  while (count < 6 && last_read != STOP) {
-    #if TETHER_CMD
-    last_read = Serial.read();
-    #else
-    last_read = mySerial.read();
-    #endif
+  while (last_read != STOP) {
+    last_read = SERIAL.read();
     
     read_buf[buf_ptr] = last_read;
     count++;
     buf_ptr = (buf_ptr + 1) % 6;
   }
-  buf_ptr = (buf_ptr + 3) % 6;
+  buf_ptr = (buf_ptr - 1) % 6;
   // Read forwards
   *in_yaw = read_buf[buf_ptr];
   buf_ptr = (buf_ptr + 1) % 6;
@@ -439,17 +406,52 @@ bool serial_read(int8_t* in_yaw, int8_t* in_pitch, int8_t* in_roll, int8_t* in_t
   return true;
 }
 
+struct vec3e desired_angle = {0, 0, 0};
+void update_controller(struct motors *u) {
+  struct state x = {myIMU.yaw, myIMU.pitch, myIMU.roll, myIMU.gz, myIMU.gx, myIMU.gy};
+  struct state rmx = {0/*desired_angle.yaw - x.y*/, desired_angle.pitch - x.p, desired_angle.roll - x.r, /*-x.yd*/0, -x.pd, -x.rd};
+  u->fr = -0.0129 * rmx.y +   0.0276 * rmx.p +  0.0219 * rmx.r + -0.0019 * rmx.yd +  0.0017 * rmx.pd +  0.0013 * rmx.rd;
+  u->fl =  0.0129 * rmx.y +   0.0276 * rmx.p + -0.0219 * rmx.r +  0.0019 * rmx.yd +  0.0017 * rmx.pd + -0.0013 * rmx.rd;
+  u->rl = -0.0129 * rmx.y +  -0.0276 * rmx.p + -0.0219 * rmx.r + -0.0019 * rmx.yd + -0.0017 * rmx.pd + -0.0013 * rmx.rd;
+  u->rr =  0.0129 * rmx.y +  -0.0276 * rmx.p +  0.0219 * rmx.r +  0.0019 * rmx.yd + -0.0017 * rmx.pd +  0.0013 * rmx.rd;
+  //u->fr *= dt / 0.010;
+  //u->fl *= dt / 0.010;
+  //u->rl *= dt / 0.010;
+  //u->rr *= dt / 0.010;
+}
+void add_throttle(struct motors *u, float throttle) {
+  if (throttle == 0.0) {
+    u->fr = 0.0;
+    u->fl = 0.0;
+    u->rl = 0.0;
+    u->rr = 0.0;
+    return;
+  }
+  u->fr = max(u->fr, 0);
+  u->fl = max(u->fl, 0);
+  u->rl = max(u->rl, 0);
+  u->rr = max(u->rr, 0);
+  float throttle_ = MIN_THROTTLE + (1 - MIN_THROTTLE) * throttle;
+  u->fr += throttle_;
+  u->fl += throttle_;
+  u->rl += throttle_;
+  u->rr += throttle_;
+}
+
 
 long last_packet = 0;
 long last_debug = 0;
 
 float throttle = 0.0;
-struct vec3e desired_angle = {0, 0, 0};
+
 void loop() {
   long now = millis();
   long delta = now - last_intr;
+  if (delta < 10) {
+    delay(10 - delta);
+  }
   last_intr = now;
-  dt = (float) delta / 1000.0;
+  dt = (float) 10 / 1000.0;
   
   update_imu();
 
@@ -486,46 +488,31 @@ void loop() {
     }
 
     throttle = ((float) min(max(in_throttle, 0), 127)) / 127.0;
-    float yaw = 10 * ((float) in_yaw) / 128.0;
-    float pitch = 15 * ((float) in_pitch) / 128.0;
-    float roll = 15 * ((float) in_roll) / 128.0;
+    float yaw = 10 * ((float) in_yaw) / 127.0;
+    float pitch = 5 * ((float) in_pitch) / 127.0;
+    float roll = 5 * ((float) in_roll) / 127.0;
     desired_angle.yaw += yaw;
     desired_angle.roll = roll;
     desired_angle.pitch = pitch;
   }
-  
-  struct vec3e error = {myIMU.yaw - desired_angle.yaw, myIMU.pitch - desired_angle.pitch, myIMU.roll - desired_angle.roll};
-  struct vec3e controller_output = calc_pid(error);
 
-  float yaw = controller_output.yaw;
-  float pitch = controller_output.pitch;
-  float roll = controller_output.roll;
-
-  if (throttle == 0.0) {
-    yaw = 0;
-    pitch = 0;
-    roll = 0;
-  }
   if (now - last_debug > 500) {
-    Serial.print(F("Throttle: "));
-    Serial.print(throttle);
-    Serial.print(F(" Roll Error: "));
-    Serial.print(error.roll);
-    Serial.print(F(" Gain: "));
-    Serial.print(100 * roll);
-    Serial.print(F(" dt: "));
-    Serial.println(delta);
+    Serial.print(F(" dt "));
+    Serial.print(delta);
+    Serial.print(F(" Angle: "));
+    Serial.print(myIMU.roll);
+    Serial.print(F(" CmdAngle: "));
+    Serial.println(desired_angle.roll);
     if (is_low_voltage()) {
       Serial.println("!!! LOW VOLTAGE !!!");
     }
     last_debug = now;
   }
 
-  struct motors pows = {throttle - pitch - roll, 
-                        throttle - pitch + roll,
-                        throttle + pitch + roll,
-                        throttle + pitch - roll};
-  desaturate(&pows);
+  struct motors pows;
+  update_controller(&pows);
+  add_throttle(&pows, throttle);
+  //desaturate(&pows);
   
   int fr = power_to_us(pows.fr);
   int fl = power_to_us(pows.fl);
