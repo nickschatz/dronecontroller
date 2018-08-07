@@ -1,18 +1,24 @@
+#include <Wire.h>
+#ifndef _WIRE2
+#define _WIRE2
+TwoWire WIRE2 (2,I2C_FAST_MODE);
+#endif
+#define Wire WIRE2
+
 #include "MPU9250.h"
 #include "quaternionFilters.h"
 
 #include <SPI.h>
 #include <Servo.h>
-#include <SoftwareSerial.h>
 
-#define STATUS_LED A0
-#define VIN_READ A1
+#define STATUS_LED PC13
+#define VIN_READ PA5
 #define CAL_COUNTS 50
 #define MIN_THROTTLE 0.2
 #define TETHER_CMD 1
-// 20 / 1023 * 12.50 / 11.71
+// 13.2 / 1023
 // Small fudge for variances in resistors
-#define VOLTAGE_SCALE 0.020869 
+#define VOLTAGE_SCALE 0.0129032258
 #define STOP 255
 
 struct vec3 {
@@ -59,32 +65,47 @@ float roll_offset;
 
 float dt = 0;
 
-SoftwareSerial mySerial(2, 3); // RX, TX
-
 //Max safe speed is 50%
 void setup() {
-  pinMode(VIN_READ, INPUT);
   pinMode(STATUS_LED, OUTPUT);
   digitalWrite(STATUS_LED, LOW);
+  pinMode(VIN_READ, INPUT);
+  
   Serial.begin(230400);
-  mySerial.begin(9600);
+  Serial2.begin(9600);
+  #if TETHER_CMD
+  while (!Serial.isConnected()) {
+     delay(200);
+     digitalWrite(STATUS_LED, HIGH);
+     delay(400);
+     digitalWrite(STATUS_LED, LOW);
+  }
+  #endif
   Serial.println(F("Starting..."));
-  Wire.begin();
 
-  esc1.attach(6);
-  esc2.attach(9);
-  esc3.attach(10);
-  esc4.attach(11);
+  pinMode(PB1, PWM);
+  pinMode(PB0, PWM);
+  pinMode(PA7, PWM);
+  pinMode(PA6, PWM);
+  esc1.attach(PB1);
+  esc2.attach(PB0);
+  esc3.attach(PA7);
+  esc4.attach(PA6);
   esc1.writeMicroseconds(1060);
   esc2.writeMicroseconds(1060);
   esc3.writeMicroseconds(1060);
   esc4.writeMicroseconds(1060);
 
+  Serial.println(F("Wrote initial to ESCs"));
+  Wire.begin();
   // Setup IMU
   byte id = myIMU.readByte(MPU9250_ADDRESS, WHO_AM_I_MPU9250);
-  if (id != 0x71) {
-    Serial.println(F("Failed to connect to MPU9250"));
-    while (1);
+  if (id != 0x73) {
+    while (1) {
+      Serial.print(F("Failed to connect to MPU9250: WAI: "));
+      Serial.println(id, HEX);
+      delay(1000);
+    }
   }
   
   Serial.println(F("Connected to IMU"));
@@ -181,12 +202,6 @@ void setup() {
   last_intr = millis();
 }
 
-float sgn(float x) {
-  if (x < 0) return -1.0;
-  if (x == 0) return 0.0;
-  return 1.0;
-}
-
 float clamp(float sig, float cutoff) {
   return min(max(-cutoff, sig), cutoff);
 }
@@ -204,13 +219,6 @@ int power_to_us(float power) {
   }
   
   return (int) 480.0 * power + 1060;
-}
-
-int un_twos(byte i) {
-  if (i > 127) {
-    return ((int) (~i + 1)) * -1;
-  }
-  return (int) i;
 }
 
 void update_imu() {
@@ -362,20 +370,13 @@ bool is_low_voltage() {
   }
 }
 
-void decr(byte* i) {
-  if (*i == 0) {
-    *i = 5;
-  }
-  (*i)--;
-}
-
 int8_t* read_buf = new int8_t[6];
 bool serial_read(int8_t* in_yaw, int8_t* in_pitch, int8_t* in_roll, int8_t* in_throttle, int8_t* special) {
   
   #if TETHER_CMD
   #define SERIAL Serial
   #else
-  #define SERIAL mySerial
+  #define SERIAL Serial2
   #endif
   if (SERIAL.available() < 6) {
     return false;
@@ -409,7 +410,7 @@ bool serial_read(int8_t* in_yaw, int8_t* in_pitch, int8_t* in_roll, int8_t* in_t
 struct vec3e desired_angle = {0, 0, 0};
 void update_controller(struct motors *u) {
   struct state x = {myIMU.yaw, myIMU.pitch, myIMU.roll, myIMU.gz, myIMU.gx, myIMU.gy};
-  struct state rmx = {0/*desired_angle.yaw - x.y*/, desired_angle.pitch - x.p, desired_angle.roll - x.r, /*-x.yd*/0, -x.pd, -x.rd};
+  struct state rmx = {desired_angle.yaw - x.y, desired_angle.pitch - x.p, desired_angle.roll - x.r, -x.yd, -x.pd, -x.rd};
   u->fr = -0.0129 * rmx.y +   0.0276 * rmx.p +  0.0219 * rmx.r + -0.0019 * rmx.yd +  0.0017 * rmx.pd +  0.0013 * rmx.rd;
   u->fl =  0.0129 * rmx.y +   0.0276 * rmx.p + -0.0219 * rmx.r +  0.0019 * rmx.yd +  0.0017 * rmx.pd + -0.0013 * rmx.rd;
   u->rl = -0.0129 * rmx.y +  -0.0276 * rmx.p + -0.0219 * rmx.r + -0.0019 * rmx.yd + -0.0017 * rmx.pd + -0.0013 * rmx.rd;
@@ -445,91 +446,92 @@ long last_debug = 0;
 float throttle = 0.0;
 
 void loop() {
+  update_imu();
   long now = millis();
   long delta = now - last_intr;
-  if (delta < 10) {
-    delay(10 - delta);
-  }
-  last_intr = now;
-  dt = (float) 10 / 1000.0;
+  if (delta >= 10) {
+    last_intr = now;
+    dt = (float) 10 / 1000.0;
+    
+    int8_t in_yaw;
+    int8_t in_pitch;
+    int8_t in_roll;
+    int8_t in_throttle;
+    int8_t special;
+    bool has_data = serial_read(&in_yaw, &in_pitch, &in_roll, &in_throttle, &special);
   
-  update_imu();
-
+    if (has_data) {
+      last_packet = millis();
+      /*Serial.print(in_yaw);
+      Serial.print(F(" P: "));
+      Serial.print(in_pitch);
+      Serial.print(F(" R: "));
+      Serial.print(in_roll);
+      Serial.print(F(" T: "));
+      Serial.print(in_throttle);
+      Serial.print(F(" S: "));
+      Serial.println(special);*/
+      if (abs(in_throttle) < 20) {
+        in_throttle = 0;
+      }
+      if (abs(in_pitch) < 10) {
+        in_pitch = 0;
+      }
+      if (abs(in_yaw) < 10) {
+        in_yaw = 0;
+      }
+      if (abs(in_roll) < 10) {
+        in_roll = 0;
+      }
   
-  int8_t in_yaw;
-  int8_t in_pitch;
-  int8_t in_roll;
-  int8_t in_throttle;
-  int8_t special;
-  bool has_data = serial_read(&in_yaw, &in_pitch, &in_roll, &in_throttle, &special);
-
-  if (has_data) {
-    last_packet = millis();
-    /*Serial.print(in_yaw);
-    Serial.print(F(" P: "));
-    Serial.print(in_pitch);
-    Serial.print(F(" R: "));
-    Serial.print(in_roll);
-    Serial.print(F(" T: "));
-    Serial.print(in_throttle);
-    Serial.print(F(" S: "));
-    Serial.println(special);*/
-    if (abs(in_throttle) < 20) {
-      in_throttle = 0;
+      throttle = ((float) min(max(in_throttle, 0), 127)) / 127.0;
+      float yaw = 10 * ((float) in_yaw) / 127.0;
+      float pitch = 5 * ((float) in_pitch) / 127.0;
+      float roll = 5 * ((float) in_roll) / 127.0;
+      desired_angle.yaw += yaw;
+      desired_angle.roll = roll;
+      desired_angle.pitch = pitch;
     }
-    if (abs(in_pitch) < 10) {
-      in_pitch = 0;
-    }
-    if (abs(in_yaw) < 10) {
-      in_yaw = 0;
-    }
-    if (abs(in_roll) < 10) {
-      in_roll = 0;
-    }
-
-    throttle = ((float) min(max(in_throttle, 0), 127)) / 127.0;
-    float yaw = 10 * ((float) in_yaw) / 127.0;
-    float pitch = 5 * ((float) in_pitch) / 127.0;
-    float roll = 5 * ((float) in_roll) / 127.0;
-    desired_angle.yaw += yaw;
-    desired_angle.roll = roll;
-    desired_angle.pitch = pitch;
-  }
-
-  if (now - last_debug > 500) {
-    Serial.print(F(" dt "));
-    Serial.print(delta);
-    Serial.print(F(" Angle: "));
-    Serial.print(myIMU.roll);
-    Serial.print(F(" CmdAngle: "));
-    Serial.println(desired_angle.roll);
-    if (is_low_voltage()) {
-      Serial.println("!!! LOW VOLTAGE !!!");
-    }
-    last_debug = now;
-  }
-
-  struct motors pows;
-  update_controller(&pows);
-  add_throttle(&pows, throttle);
-  //desaturate(&pows);
   
-  int fr = power_to_us(pows.fr);
-  int fl = power_to_us(pows.fl);
-  int rl = power_to_us(pows.rl);
-  int rr = power_to_us(pows.rr);
-
-  if (millis() - last_packet < 500) {
-    esc1.writeMicroseconds(fr);
-    esc2.writeMicroseconds(fl);
-    esc3.writeMicroseconds(rl);
-    esc4.writeMicroseconds(rr);
-  }
-  else {
-    esc1.writeMicroseconds(1060);
-    esc2.writeMicroseconds(1060);
-    esc3.writeMicroseconds(1060);
-    esc4.writeMicroseconds(1060);
+    if (now - last_debug > 500) {
+      Serial.print(F(" dt "));
+      Serial.print(delta);
+      Serial.print(F(" gy: "));
+      Serial.print(myIMU.gy);
+      Serial.print(F(" gx: "));
+      Serial.print(myIMU.gx);
+      Serial.print(F(" gz: "));
+      Serial.print(myIMU.gz);
+      Serial.print(F(" CmdAngle: "));
+      Serial.println(desired_angle.roll);
+      if (is_low_voltage()) {
+        Serial.println("!!! LOW VOLTAGE !!!");
+      }
+      last_debug = now;
+    }
+  
+    struct motors pows;
+    update_controller(&pows);
+    add_throttle(&pows, throttle);
+    //desaturate(&pows);
+    
+    int fr = power_to_us(pows.fr);
+    int fl = power_to_us(pows.fl);
+    int rl = power_to_us(pows.rl);
+    int rr = power_to_us(pows.rr);
+  
+    if (millis() - last_packet < 500) {
+      esc1.writeMicroseconds(fr);
+      esc2.writeMicroseconds(fl);
+      esc3.writeMicroseconds(rl);
+      esc4.writeMicroseconds(rr);
+    }
+    else {
+      esc1.writeMicroseconds(1060);
+      esc2.writeMicroseconds(1060);
+      esc3.writeMicroseconds(1060);
+      esc4.writeMicroseconds(1060);
+    }
   }
   
 }
