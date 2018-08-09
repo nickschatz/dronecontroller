@@ -1,9 +1,6 @@
 #include <Wire.h>
-#ifndef _WIRE2
-#define _WIRE2
+#include "ente.h"
 TwoWire WIRE2 (2,I2C_FAST_MODE);
-#endif
-#define Wire WIRE2
 
 #include "MPU9250.h"
 #include "quaternionFilters.h"
@@ -11,50 +8,12 @@ TwoWire WIRE2 (2,I2C_FAST_MODE);
 #include <SPI.h>
 #include <Servo.h>
 
-#define STATUS_LED PC13
-#define VIN_READ PA5
-#define CAL_COUNTS 50
-#define MIN_THROTTLE 0.2
-#define TETHER_CMD 1
-// 13.2 / 1023
-// Small fudge for variances in resistors
-#define VOLTAGE_SCALE 0.0129032258
-#define STOP 255
-
-struct vec3 {
-  float x;
-  float y;
-  float z;
-};
-
-struct vec3e {
-  float yaw;
-  float pitch;
-  float roll;
-};
-
-struct state {
-  float y;
-  float p;
-  float r;
-  float yd;
-  float pd;
-  float rd;
-};
-
-typedef struct motors {
-  float fr;
-  float fl;
-  float rl;
-  float rr;
-};
-
 Servo esc1;
 Servo esc2;
 Servo esc3;
 Servo esc4;
 
-MPU9250 myIMU;
+MPU9250 myIMU(WIRE2, 0x68);
 
 long last;
 long last_intr;
@@ -64,6 +23,12 @@ float pitch_offset;
 float roll_offset;
 
 float dt = 0;
+float ax, ay, az;
+float gx, gy, gz;
+float mx, my, mz;
+float yaw, pitch, roll;
+float _ayaw, _apitch, _aroll;
+float _gyaw, _gpitch, _groll;
 
 //Max safe speed is 50%
 void setup() {
@@ -97,104 +62,19 @@ void setup() {
   esc4.writeMicroseconds(1060);
 
   Serial.println(F("Wrote initial to ESCs"));
-  Wire.begin();
-  // Setup IMU
-  byte id = myIMU.readByte(MPU9250_ADDRESS, WHO_AM_I_MPU9250);
-  if (id != 0x73) {
-    while (1) {
-      Serial.print(F("Failed to connect to MPU9250: WAI: "));
-      Serial.println(id, HEX);
-      delay(1000);
-    }
+  int status = myIMU.begin();
+  if (status < 0) {
+    Serial.print("Failed to connect to MPU9255: ");
+    Serial.println(status);
+    while (1);
   }
-  
-  Serial.println(F("Connected to IMU"));
-  // Start by performing self test and reporting values
-    myIMU.MPU9250SelfTest(myIMU.SelfTest);
-    Serial.print(F("x-axis self test: acceleration trim within : "));
-    Serial.print(myIMU.SelfTest[0],1); Serial.println(F("% of factory value"));
-    Serial.print(F("y-axis self test: acceleration trim within : "));
-    Serial.print(myIMU.SelfTest[1],1); Serial.println(F("% of factory value"));
-    Serial.print(F("z-axis self test: acceleration trim within : "));
-    Serial.print(myIMU.SelfTest[2],1); Serial.println(F("% of factory value"));
-    Serial.print(F("x-axis self test: gyration trim within : "));
-    Serial.print(myIMU.SelfTest[3],1); Serial.println(F("% of factory value"));
-    Serial.print(F("y-axis self test: gyration trim within : "));
-    Serial.print(myIMU.SelfTest[4],1); Serial.println(F("% of factory value"));
-    Serial.print(F("z-axis self test: gyration trim within : "));
-    Serial.print(myIMU.SelfTest[5],1); Serial.println(F("% of factory value"));
+  myIMU.setAccelRange(MPU9250::ACCEL_RANGE_4G);
+  myIMU.setGyroRange(MPU9250::GYRO_RANGE_500DPS);
+  myIMU.enableDataReadyInterrupt();
 
-    // Calibrate gyro and accelerometers, load biases in bias registers
-    myIMU.calibrateMPU9250(myIMU.gyroBias, myIMU.accelBias);
-
-    myIMU.initMPU9250();
-    // Initialize device for active mode read of acclerometer, gyroscope, and
-    // temperature
-    Serial.println(F("MPU9250 initialized for active data mode...."));
-
-    // Read the WHO_AM_I register of the magnetometer, this is a good test of
-    // communication
-    byte d = myIMU.readByte(AK8963_ADDRESS, WHO_AM_I_AK8963);
-    Serial.print(F("AK8963 ")); Serial.print(F("I AM ")); Serial.print(d, HEX);
-    Serial.print(F(" I should be ")); Serial.println(0x48, HEX);
-
-    // Get magnetometer calibration from AK8963 ROM
-    myIMU.initAK8963(myIMU.magCalibration);
-    // Initialize device for active mode read of magnetometer
-    Serial.println(F("AK8963 initialized for active data mode...."));
-  
-  Serial.println(F("Calculating bias..."));
-  int counts = 0;
-  float yawAvr[CAL_COUNTS];
-  float pitchAvr[CAL_COUNTS];
-  float rollAvr[CAL_COUNTS];
-
-  //Wait a few seconds for IMU values to stabilize
-  digitalWrite(STATUS_LED, HIGH);
-  long start = millis();
-  while (millis() - start < 2000) {
-    update_imu();
-  }
-  
-  bool ledState = true;
-  while (counts < CAL_COUNTS) {
-    if (!ledState) {
-      digitalWrite(STATUS_LED, HIGH);
-      ledState = true;
-    }
-    else {
-      digitalWrite(STATUS_LED, LOW);
-      ledState = false;
-    }
-    update_imu();
-    pitchAvr[counts] = myIMU.pitch;
-    rollAvr[counts] = myIMU.roll;
-    yawAvr[counts] = myIMU.yaw;
-    
-    counts++;
-    delay(100);
-  }
-  float yaw_sum = 0;
-  float roll_sum = 0;
-  float pitch_sum = 0;
-  
-  float x_sum = 0;
-  float y_sum = 0;
-  float z_sum = 0;
-  for (int i = 0; i < CAL_COUNTS; i++) {
-    yaw_sum += yawAvr[i];
-    pitch_sum += pitchAvr[i];
-    roll_sum += rollAvr[i];
-  }
-  yaw_offset = yaw_sum / CAL_COUNTS;
-  pitch_offset = pitch_sum / CAL_COUNTS;
-  roll_offset = roll_sum / CAL_COUNTS;
-  Serial.print(F("Yaw bias:"));
-  Serial.println(yaw_offset);
-  Serial.print(F("Pitch bias:"));
-  Serial.println(pitch_offset);
-  Serial.print(F("Roll bias:"));
-  Serial.println(roll_offset);
+  myIMU.setMagCalX(-0.76, 2.00);
+  myIMU.setMagCalY(14.49, 1.33);
+  myIMU.setMagCalZ(35.09, 0.57);
   
   Serial.println(F("READY"));
   digitalWrite(STATUS_LED, HIGH);
@@ -221,110 +101,58 @@ int power_to_us(float power) {
   return (int) 480.0 * power + 1060;
 }
 
+unsigned long last_imu = millis();
 void update_imu() {
-  // If intPin goes high, all data registers have new data
-  // On interrupt, check if data ready interrupt
-  if (myIMU.readByte(MPU9250_ADDRESS, INT_STATUS) & 0x01)
-  {  
-    myIMU.readAccelData(myIMU.accelCount);  // Read the x/y/z adc values
-    myIMU.getAres();
-
-    // Now we'll calculate the accleration value into actual g's
-    // This depends on scale being set
-    myIMU.ax = (float)myIMU.accelCount[0]*myIMU.aRes; // - accelBias[0];
-    myIMU.ay = (float)myIMU.accelCount[1]*myIMU.aRes; // - accelBias[1];
-    myIMU.az = (float)myIMU.accelCount[2]*myIMU.aRes; // - accelBias[2];
-
-    myIMU.readGyroData(myIMU.gyroCount);  // Read the x/y/z adc values
-    myIMU.getGres();
-
-    // Calculate the gyro value into actual degrees per second
-    // This depends on scale being set
-    myIMU.gx = (float)myIMU.gyroCount[0]*myIMU.gRes;
-    myIMU.gy = (float)myIMU.gyroCount[1]*myIMU.gRes;
-    myIMU.gz = (float)myIMU.gyroCount[2]*myIMU.gRes;
-
-    myIMU.readMagData(myIMU.magCount);  // Read the x/y/z adc values
-    myIMU.getMres();
-    // User environmental x-axis correction in milliGauss, should be
-    // automatically calculated
-    myIMU.magbias[0] = +470.;
-    // User environmental x-axis correction in milliGauss TODO axis??
-    myIMU.magbias[1] = +120.;
-    // User environmental x-axis correction in milliGauss
-    myIMU.magbias[2] = +125.;
-
-    // Calculate the magnetometer values in milliGauss
-    // Include factory calibration per data sheet and user environmental
-    // corrections
-    // Get actual magnetometer value, this depends on scale being set
-    myIMU.mx = (float)myIMU.magCount[0]*myIMU.mRes*myIMU.magCalibration[0] -
-               myIMU.magbias[0];
-    myIMU.my = (float)myIMU.magCount[1]*myIMU.mRes*myIMU.magCalibration[1] -
-               myIMU.magbias[1];
-    myIMU.mz = (float)myIMU.magCount[2]*myIMU.mRes*myIMU.magCalibration[2] -
-               myIMU.magbias[2];
-  } // if (readByte(MPU9250_ADDRESS, INT_STATUS) & 0x01)
-
-  // Must be called before updating quaternions!
-  myIMU.updateTime();
-
-  // Sensors x (y)-axis of the accelerometer is aligned with the y (x)-axis of
-  // the magnetometer; the magnetometer z-axis (+ down) is opposite to z-axis
-  // (+ up) of accelerometer and gyro! We have to make some allowance for this
-  // orientationmismatch in feeding the output to the quaternion filter. For the
-  // MPU-9250, we have chosen a magnetic rotation that keeps the sensor forward
-  // along the x-axis just like in the LSM9DS0 sensor. This rotation can be
-  // modified to allow any convenient orientation convention. This is ok by
-  // aircraft orientation standards! Pass gyro rate as rad/s
+  myIMU.readSensor();
+  ax = myIMU.getAccelX_mss();
+  ay = myIMU.getAccelY_mss();
+  az = myIMU.getAccelZ_mss();
+  gx = myIMU.getGyroX_rads() * RAD_TO_DEG;
+  gy = myIMU.getGyroY_rads() * RAD_TO_DEG;
+  gz = myIMU.getGyroZ_rads() * RAD_TO_DEG;
+  mx = myIMU.getMagX_uT();
+  my = myIMU.getMagY_uT();
+  mz = myIMU.getMagZ_uT();
   
-  /*MahonyQuaternionUpdate(myIMU.ax, myIMU.ay, myIMU.az, myIMU.gx*DEG_TO_RAD,
-                         myIMU.gy*DEG_TO_RAD, myIMU.gz*DEG_TO_RAD, myIMU.my,
-                         myIMU.mx, myIMU.mz, myIMU.deltat);*/
-  
-  // Serial print and/or display at 0.5 s rate independent of data rates
-  myIMU.delt_t = millis() - myIMU.count;
+  unsigned long noww = micros();
+  float deltaa = ((float) (noww - last_imu)) / 1000000.0f;
+  last_imu = noww;
+  quat_update(deltaa);
+}
 
-  // update ypr at 200Hz
-  if (myIMU.delt_t > 5)
-  {
-    MadgwickQuaternionUpdate(myIMU.ax, myIMU.ay, myIMU.az, myIMU.gx*PI/180.0f, myIMU.gy*PI/180.0f, myIMU.gz*PI/180.0f,  myIMU.my, myIMU.mx, myIMU.mz, myIMU.deltat);
+void quat_update(float deltaa) {
+  MadgwickQuaternionUpdate(ax, ay, -az, gx * DEG_TO_RAD, gy * DEG_TO_RAD, -gz * DEG_TO_RAD, mx, my, mz, deltaa);
+  yaw   = atan2(2.0f * (*(getQ()+1) * *(getQ()+2) + *getQ() *
+                *(getQ()+3)), *getQ() * *getQ() + *(getQ()+1) * *(getQ()+1)
+                - *(getQ()+2) * *(getQ()+2) - *(getQ()+3) * *(getQ()+3));
+  pitch = asin(2.0f * (*(getQ()+1) * *(getQ()+3) - *getQ() *
+                *(getQ()+2)));
+  roll  = atan2(2.0f * (*getQ() * *(getQ()+1) + *(getQ()+2) *
+                *(getQ()+3)), *getQ() * *getQ() - *(getQ()+1) * *(getQ()+1)
+                - *(getQ()+2) * *(getQ()+2) + *(getQ()+3) * *(getQ()+3));
+  pitch *= RAD_TO_DEG;
+  yaw   *= RAD_TO_DEG;
+  yaw   -= 0.2167;
+  roll *= RAD_TO_DEG;
+}
 
-// Define output variables from updated quaternion---these are Tait-Bryan
-// angles, commonly used in aircraft orientation. In this coordinate system,
-// the positive z-axis is down toward Earth. Yaw is the angle between Sensor
-// x-axis and Earth magnetic North (or true North if corrected for local
-// declination, looking down on the sensor positive yaw is counterclockwise.
-// Pitch is angle between sensor x-axis and Earth ground plane, toward the
-// Earth is positive, up toward the sky is negative. Roll is angle between
-// sensor y-axis and Earth ground plane, y-axis up is positive roll. These
-// arise from the definition of the homogeneous rotation matrix constructed
-// from quaternions. Tait-Bryan angles as well as Euler angles are
-// non-commutative; that is, the get the correct orientation the rotations
-// must be applied in the correct order which for this configuration is yaw,
-// pitch, and then roll.
-// For more see
-// http://en.wikipedia.org/wiki/Conversion_between_quaternions_and_Euler_angles
-// which has additional links.
-    myIMU.yaw   = atan2(2.0f * (*(getQ()+1) * *(getQ()+2) + *getQ() *
-                  *(getQ()+3)), *getQ() * *getQ() + *(getQ()+1) * *(getQ()+1)
-                  - *(getQ()+2) * *(getQ()+2) - *(getQ()+3) * *(getQ()+3));
-    myIMU.pitch = -asin(2.0f * (*(getQ()+1) * *(getQ()+3) - *getQ() *
-                  *(getQ()+2)));
-    myIMU.roll  = atan2(2.0f * (*getQ() * *(getQ()+1) + *(getQ()+2) *
-                  *(getQ()+3)), *getQ() * *getQ() - *(getQ()+1) * *(getQ()+1)
-                  - *(getQ()+2) * *(getQ()+2) + *(getQ()+3) * *(getQ()+3));
-    myIMU.pitch *= RAD_TO_DEG;
-    myIMU.yaw   *= RAD_TO_DEG;
-    // - http://www.ngdc.noaa.gov/geomag-web/#declination
-    myIMU.yaw   -= 0.2167;
-    myIMU.roll  *= RAD_TO_DEG;
-
-    //Subtract offsets
-    myIMU.yaw -= yaw_offset;
-    myIMU.pitch -= pitch_offset;
-    myIMU.roll -= roll_offset;
+void complementary_update(float deltaa) {
+  float r = 0.0;
+  float gr = 1.0 - r;
+  float grav;
+  float amag = sqrt(ax * ax + ay * ay + az * az);
+  if (amag > 0.0) {
+    _ayaw += atan2(ay, ax) * RAD_TO_DEG * deltaa;
+    _apitch += atan2(az, ay) * RAD_TO_DEG * deltaa;
+    _aroll += atan2(ax, az) * RAD_TO_DEG * deltaa;
   }
+  _gyaw += gz * deltaa;
+  _gpitch += gx * deltaa;
+  _groll += gy * deltaa;
+
+  yaw = _gyaw * gr + _ayaw * r;
+  pitch = _gpitch * gr + _apitch * r;
+  roll = _groll * gr + _aroll * r;
 }
 
 
@@ -409,7 +237,7 @@ bool serial_read(int8_t* in_yaw, int8_t* in_pitch, int8_t* in_roll, int8_t* in_t
 
 struct vec3e desired_angle = {0, 0, 0};
 void update_controller(struct motors *u) {
-  struct state x = {myIMU.yaw, myIMU.pitch, myIMU.roll, myIMU.gz, myIMU.gx, myIMU.gy};
+  struct state x = {yaw, pitch, roll, gz, gx, gy};
   struct state rmx = {desired_angle.yaw - x.y, desired_angle.pitch - x.p, desired_angle.roll - x.r, -x.yd, -x.pd, -x.rd};
   u->fr = -0.0129 * rmx.y +   0.0276 * rmx.p +  0.0219 * rmx.r + -0.0019 * rmx.yd +  0.0017 * rmx.pd +  0.0013 * rmx.rd;
   u->fl =  0.0129 * rmx.y +   0.0276 * rmx.p + -0.0219 * rmx.r +  0.0019 * rmx.yd +  0.0017 * rmx.pd + -0.0013 * rmx.rd;
@@ -449,9 +277,9 @@ void loop() {
   update_imu();
   long now = millis();
   long delta = now - last_intr;
-  if (delta >= 10) {
+  if (delta >= 5) {
     last_intr = now;
-    dt = (float) 10 / 1000.0;
+    dt = (float) delta / 1000.0;
     
     int8_t in_yaw;
     int8_t in_pitch;
@@ -485,25 +313,21 @@ void loop() {
       }
   
       throttle = ((float) min(max(in_throttle, 0), 127)) / 127.0;
-      float yaw = 10 * ((float) in_yaw) / 127.0;
-      float pitch = 5 * ((float) in_pitch) / 127.0;
-      float roll = 5 * ((float) in_roll) / 127.0;
-      desired_angle.yaw += yaw;
-      desired_angle.roll = roll;
-      desired_angle.pitch = pitch;
+      float cyaw = 10 * ((float) in_yaw) / 127.0;
+      float cpitch = 5 * ((float) in_pitch) / 127.0;
+      float croll = 5 * ((float) in_roll) / 127.0;
+      desired_angle.yaw += cyaw;
+      desired_angle.roll = croll;
+      desired_angle.pitch = cpitch;
     }
   
     if (now - last_debug > 500) {
-      Serial.print(F(" dt "));
-      Serial.print(delta);
-      Serial.print(F(" gy: "));
-      Serial.print(myIMU.gy);
-      Serial.print(F(" gx: "));
-      Serial.print(myIMU.gx);
-      Serial.print(F(" gz: "));
-      Serial.print(myIMU.gz);
-      Serial.print(F(" CmdAngle: "));
-      Serial.println(desired_angle.roll);
+      Serial.print(F(" yaw: "));
+      Serial.print(yaw);
+      Serial.print(F(" pitch: "));
+      Serial.print(pitch);
+      Serial.print(F(" roll: "));
+      Serial.println(roll);
       if (is_low_voltage()) {
         Serial.println("!!! LOW VOLTAGE !!!");
       }
@@ -534,4 +358,92 @@ void loop() {
     }
   }
   
+}
+
+void magcal() {
+  Serial.println("Mag Calibration: Wave device in a figure eight until done!");
+  delay(4000);
+  myIMU.calibrateMag();
+  Serial.print(" Offset X: ");
+  Serial.print(myIMU.getMagBiasX_uT());
+  Serial.print(" Offset Y: ");
+  Serial.print(myIMU.getMagBiasY_uT());
+  Serial.print(" Offset Z: ");
+  Serial.println(myIMU.getMagBiasZ_uT());
+  Serial.print("Scale X: ");
+  Serial.print(myIMU.getMagScaleFactorX());
+  Serial.print(" Scale Y: ");
+  Serial.print(myIMU.getMagScaleFactorY());
+  Serial.print(" Scale Z: ");
+  Serial.println(myIMU.getMagScaleFactorZ());
+  Serial.println("Mag Calibration done!");
+}
+
+void acccal() {
+  Serial.println("Accel Calibration: Move to X up (5s)");
+  delay(5000);
+  myIMU.calibrateAccel();
+  Serial.print(" Offset X: ");
+  Serial.print(myIMU.getAccelBiasX_mss());
+  Serial.print(" Scale X: ");
+  Serial.println(myIMU.getAccelScaleFactorX());
+  
+  Serial.println("Accel Calibration: Move to X down (5s)");
+  delay(5000);
+  myIMU.calibrateAccel();
+  Serial.print(" Offset X: ");
+  Serial.print(myIMU.getAccelBiasX_mss());
+  Serial.print(" Scale X: ");
+  Serial.println(myIMU.getAccelScaleFactorX());
+
+  Serial.println("Accel Calibration: Move to Y up (5s)");
+  delay(5000);
+  myIMU.calibrateAccel();
+  Serial.print(" Offset Y: ");
+  Serial.print(myIMU.getAccelBiasY_mss());
+  Serial.print(" Scale Y: ");
+  Serial.println(myIMU.getAccelScaleFactorY());
+
+  Serial.println("Accel Calibration: Move to Y down (5s)");
+  delay(5000);  
+  myIMU.calibrateAccel();
+  Serial.print(" Offset Y: ");
+  Serial.print(myIMU.getAccelBiasY_mss());
+  Serial.print(" Scale Y: ");
+  Serial.println(myIMU.getAccelScaleFactorY());
+
+  Serial.println("Accel Calibration: Move to Z down (5s)");
+  delay(5000);  
+  Serial.print(" Offset Z: ");
+  Serial.print(myIMU.getAccelBiasZ_mss());  
+  Serial.print(" Scale Z: ");
+  Serial.println(myIMU.getAccelScaleFactorZ());
+
+  Serial.println("Accel Calibration: Move to Z up (5s)");
+  delay(5000);  
+  Serial.print(" Offset Z: ");
+  Serial.print(myIMU.getAccelBiasZ_mss());  
+  Serial.print(" Scale Z: ");
+  Serial.println(myIMU.getAccelScaleFactorZ());
+  
+  Serial.println("Accel Calibration done!");
+}
+void acccal2() {
+  Serial.println("Accel Calibration: Move around");
+  delay(5000);
+  myIMU.calibrateAccel();
+  Serial.print(" Offset X: ");
+  Serial.print(myIMU.getAccelBiasX_mss());
+  Serial.print(" Scale X: ");
+  Serial.println(myIMU.getAccelScaleFactorX());
+  Serial.print(" Offset Y: ");
+  Serial.print(myIMU.getAccelBiasY_mss());
+  Serial.print(" Scale Y: ");
+  Serial.println(myIMU.getAccelScaleFactorY());
+  Serial.print(" Offset Z: ");
+  Serial.print(myIMU.getAccelBiasZ_mss());  
+  Serial.print(" Scale Z: ");
+  Serial.println(myIMU.getAccelScaleFactorZ());
+  
+  Serial.println("Accel Calibration done!");
 }
