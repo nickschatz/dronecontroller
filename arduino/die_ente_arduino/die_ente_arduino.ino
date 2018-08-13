@@ -1,3 +1,5 @@
+#include <Eigen.h>
+
 #include <Wire.h>
 #include "ente.h"
 TwoWire WIRE2 (2,I2C_FAST_MODE);
@@ -27,14 +29,57 @@ float ax, ay, az;
 float gx, gy, gz;
 float mx, my, mz;
 float yaw, pitch, roll;
+float dyaw, dpitch, droll;
 float _ayaw, _apitch, _aroll;
 float _gyaw, _gpitch, _groll;
+
+Eigen::MatrixXf K(4, 6);
+Eigen::MatrixXf A(6, 6);
+Eigen::MatrixXf B(6, 4);
+Eigen::MatrixXf L(6, 6);
+Eigen::VectorXf x_hat(6);
+Eigen::VectorXf y_hat(6);
+Eigen::VectorXf u_last(4);
+
+float _min(float a, float b);
+float _max(float a, float b);
 
 //Max safe speed is 50%
 void setup() {
   pinMode(STATUS_LED, OUTPUT);
   digitalWrite(STATUS_LED, LOW);
   pinMode(VIN_READ, INPUT);
+
+  // Setup matrices
+  K << 
+  -0.025503,  0.029283,  0.045606, -0.003534,  0.003077,  0.002510, 
+   0.025503,  0.029283, -0.045606,  0.003534,  0.003077, -0.002510, 
+  -0.025503, -0.029283, -0.045606, -0.003534, -0.003077, -0.002510, 
+   0.025503, -0.029283,  0.045606,  0.003534, -0.003077,  0.002510;
+  A << 
+   1.000000, 0.000000, 0.000000,  0.005000, 0.000000, 0.000000, 
+  0.000000,  1.000000, 0.000000, 0.000000,  0.005000, 0.000000, 
+  0.000000, 0.000000,  1.000000, 0.000000, 0.000000,  0.005000, 
+  0.000000, 0.000000, 0.000000,  1.000000, 0.000000, 0.000000, 
+  0.000000, 0.000000, 0.000000, 0.000000,  1.000000, 0.000000, 
+  0.000000, 0.000000, 0.000000, 0.000000, 0.000000,  1.000000;
+  B << 
+  -0.172625,  0.172625, -0.172625,  0.172625, 
+   0.205230,  0.205230, -0.205230, -0.205230, 
+   0.258648, -0.258648, -0.258648,  0.258648, 
+  -69.049803,  69.049803, -69.049803,  69.049803, 
+   82.092120,  82.092120, -82.092120, -82.092120, 
+   103.459044, -103.459044, -103.459044,  103.459044;
+  L << 
+   0.022000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 
+  0.000000,  0.020000, 0.000000, 0.000000, 0.000000, 0.000000, 
+  0.000000, 0.000000,  0.018000, 0.000000, 0.000000, 0.000000, 
+   1.000000, 0.000000, 0.000000,  0.016000, 0.000000, 0.000000, 
+  0.000000,  1.000000, 0.000000, 0.000000,  0.014000, 0.000000, 
+  0.000000, 0.000000,  1.000000, 0.000000, 0.000000,  0.012000;
+
+  x_hat << 0,0,0,0,0,0;
+  y_hat = x_hat;
   
   Serial.begin(230400);
   Serial2.begin(9600);
@@ -47,6 +92,8 @@ void setup() {
   }
   #endif
   Serial.println(F("Starting..."));
+  Serial.print(get_battery_voltage());
+  Serial.println("V");
 
   pinMode(PB1, PWM);
   pinMode(PB0, PWM);
@@ -83,7 +130,7 @@ void setup() {
 }
 
 float clamp(float sig, float cutoff) {
-  return min(max(-cutoff, sig), cutoff);
+  return _min(_max(-cutoff, sig), cutoff);
 }
 
 int power_to_us(float power) {
@@ -101,7 +148,7 @@ int power_to_us(float power) {
   return (int) 480.0 * power + 1060;
 }
 
-unsigned long last_imu = millis();
+unsigned long last_imu = micros();
 void update_imu() {
   myIMU.readSensor();
   ax = myIMU.getAccelX_mss();
@@ -113,6 +160,9 @@ void update_imu() {
   mx = myIMU.getMagX_uT();
   my = myIMU.getMagY_uT();
   mz = myIMU.getMagZ_uT();
+  dyaw = -gz;
+  dpitch = -gx;
+  droll = -gy;
   
   unsigned long noww = micros();
   float deltaa = ((float) (noww - last_imu)) / 1000000.0f;
@@ -122,12 +172,12 @@ void update_imu() {
 
 void quat_update(float deltaa) {
   MadgwickQuaternionUpdate(ax, ay, -az, gx * DEG_TO_RAD, gy * DEG_TO_RAD, -gz * DEG_TO_RAD, mx, my, mz, deltaa);
-  yaw   = atan2(2.0f * (*(getQ()+1) * *(getQ()+2) + *getQ() *
+  yaw   = -atan2(2.0f * (*(getQ()+1) * *(getQ()+2) + *getQ() *
                 *(getQ()+3)), *getQ() * *getQ() + *(getQ()+1) * *(getQ()+1)
                 - *(getQ()+2) * *(getQ()+2) - *(getQ()+3) * *(getQ()+3));
   pitch = asin(2.0f * (*(getQ()+1) * *(getQ()+3) - *getQ() *
                 *(getQ()+2)));
-  roll  = atan2(2.0f * (*getQ() * *(getQ()+1) + *(getQ()+2) *
+  roll  = -atan2(2.0f * (*getQ() * *(getQ()+1) + *(getQ()+2) *
                 *(getQ()+3)), *getQ() * *getQ() - *(getQ()+1) * *(getQ()+1)
                 - *(getQ()+2) * *(getQ()+2) + *(getQ()+3) * *(getQ()+3));
   pitch *= RAD_TO_DEG;
@@ -163,8 +213,8 @@ void desaturate(struct motors *pows) {
   if (pows->fr == 0.0 && pows->fl == 0.0 && pows->rl == 0.0 && pows->rr == 0.0) {
     return;
   }
-  float minpow = min(pows->fr, min(pows->fl, min(pows->rl, pows->rr)));
-  float maxpow = max(pows->fr, max(pows->fl, max(pows->rl, pows->rr)));
+  float minpow = _min(pows->fr, _min(pows->fl, _min(pows->rl, pows->rr)));
+  float maxpow = _max(pows->fr, _max(pows->fl, _max(pows->rl, pows->rr)));
   // No need to do anything if it's already in acceptable range
   if (maxpow <= 1.0 && minpow >= MIN_THROTTLE) {
     return;
@@ -178,8 +228,8 @@ void desaturate(struct motors *pows) {
   pows->rr = (pows->rr - minpow) / d;
 
   // Rescale to min and max
-  float min_ = max(minpow, MIN_THROTTLE);
-  float max_ = min(maxpow, 1.0);
+  float min_ = _max(minpow, MIN_THROTTLE);
+  float max_ = _min(maxpow, 1.0);
   float d2 = max_ - min_;
   pows->fr = pows->fr * d2 + min_;
   pows->fl = pows->fl * d2 + min_;
@@ -187,15 +237,13 @@ void desaturate(struct motors *pows) {
   pows->rr = pows->rr * d2 + min_;
 }
 
+float get_battery_voltage() {
+  return ((float) analogRead(VIN_READ)) * VOLTAGE_SCALE;
+}
+
 bool is_low_voltage() {
-  float vin = ((float) analogRead(VIN_READ)) * VOLTAGE_SCALE;
-  if (vin < 8.0) {
-    // Either this LiPo is totally screwed or you're on USB power
-    return false;
-  }
-  else {
-    return vin < 10.0;
-  }
+  float vin = get_battery_voltage();
+  return vin < 10.0f;
 }
 
 int8_t* read_buf = new int8_t[6];
@@ -237,16 +285,26 @@ bool serial_read(int8_t* in_yaw, int8_t* in_pitch, int8_t* in_roll, int8_t* in_t
 
 struct vec3e desired_angle = {0, 0, 0};
 void update_controller(struct motors *u) {
-  struct state x = {yaw, pitch, roll, gz, gx, gy};
-  struct state rmx = {desired_angle.yaw - x.y, desired_angle.pitch - x.p, desired_angle.roll - x.r, -x.yd, -x.pd, -x.rd};
-  u->fr = -0.0129 * rmx.y +   0.0276 * rmx.p +  0.0219 * rmx.r + -0.0019 * rmx.yd +  0.0017 * rmx.pd +  0.0013 * rmx.rd;
-  u->fl =  0.0129 * rmx.y +   0.0276 * rmx.p + -0.0219 * rmx.r +  0.0019 * rmx.yd +  0.0017 * rmx.pd + -0.0013 * rmx.rd;
-  u->rl = -0.0129 * rmx.y +  -0.0276 * rmx.p + -0.0219 * rmx.r + -0.0019 * rmx.yd + -0.0017 * rmx.pd + -0.0013 * rmx.rd;
-  u->rr =  0.0129 * rmx.y +  -0.0276 * rmx.p +  0.0219 * rmx.r +  0.0019 * rmx.yd + -0.0017 * rmx.pd +  0.0013 * rmx.rd;
-  //u->fr *= dt / 0.010;
-  //u->fl *= dt / 0.010;
-  //u->rl *= dt / 0.010;
-  //u->rr *= dt / 0.010;
+  Eigen::VectorXf y(6);
+  y << yaw, pitch, roll, dyaw, dpitch, droll;
+  Eigen::VectorXf r(6);
+  r << yaw, desired_angle.pitch, desired_angle.roll, dyaw, 0.0, 0.0;
+  Eigen::VectorXf u_vec;
+
+  //Observer
+  x_hat = A * x_hat + B * u_last + L * (y - y_hat);
+  y_hat = x_hat;
+
+  // Controller
+  u_vec = K*(r - x_hat);
+  for (int i = 0; i < 4; i++) {
+    u_vec(i) = _min(_max(u_vec(i), 0.0), 1.0);
+  }
+  u_last = u_vec;
+  u->fr = u_vec(0);
+  u->fl = u_vec(1);
+  u->rl = u_vec(2);
+  u->rr = u_vec(3);
 }
 void add_throttle(struct motors *u, float throttle) {
   if (throttle == 0.0) {
@@ -256,10 +314,10 @@ void add_throttle(struct motors *u, float throttle) {
     u->rr = 0.0;
     return;
   }
-  u->fr = max(u->fr, 0);
-  u->fl = max(u->fl, 0);
-  u->rl = max(u->rl, 0);
-  u->rr = max(u->rr, 0);
+  u->fr = _max(u->fr, 0);
+  u->fl = _max(u->fl, 0);
+  u->rl = _max(u->rl, 0);
+  u->rr = _max(u->rr, 0);
   float throttle_ = MIN_THROTTLE + (1 - MIN_THROTTLE) * throttle;
   u->fr += throttle_;
   u->fl += throttle_;
@@ -312,7 +370,7 @@ void loop() {
         in_roll = 0;
       }
   
-      throttle = ((float) min(max(in_throttle, 0), 127)) / 127.0;
+      throttle = ((float) _min(_max(in_throttle, 0), 127)) / 127.0;
       float cyaw = 10 * ((float) in_yaw) / 127.0;
       float cpitch = 5 * ((float) in_pitch) / 127.0;
       float croll = 5 * ((float) in_roll) / 127.0;
@@ -323,13 +381,13 @@ void loop() {
   
     if (now - last_debug > 500) {
       Serial.print(F(" yaw: "));
-      Serial.print(yaw);
+      Serial.print(x_hat(0));
       Serial.print(F(" pitch: "));
-      Serial.print(pitch);
+      Serial.print(x_hat(1));
       Serial.print(F(" roll: "));
-      Serial.println(roll);
+      Serial.println(x_hat(2));
       if (is_low_voltage()) {
-        Serial.println("!!! LOW VOLTAGE !!!");
+        //Serial.println("!!! LOW VOLTAGE !!!");
       }
       last_debug = now;
     }
@@ -358,6 +416,20 @@ void loop() {
     }
   }
   
+}
+
+float _min(float a, float b) {
+  if (a < b) {
+    return a;
+  }
+  return b;
+}
+
+float _max(float a, float b) {
+  if (a > b) {
+    return a;
+  }
+  return b;
 }
 
 void magcal() {
@@ -447,3 +519,18 @@ void acccal2() {
   
   Serial.println("Accel Calibration done!");
 }
+void esctest() {
+  esc1.writeMicroseconds(power_to_us(0.2f));
+  delay(500);
+  esc1.writeMicroseconds(power_to_us(0.0f));
+  esc2.writeMicroseconds(power_to_us(0.2f));
+  delay(500);
+  esc2.writeMicroseconds(power_to_us(0.0f));
+  esc3.writeMicroseconds(power_to_us(0.2f));
+  delay(500);
+  esc3.writeMicroseconds(power_to_us(0.0f));
+  esc4.writeMicroseconds(power_to_us(0.2f));
+  delay(500);
+  esc4.writeMicroseconds(power_to_us(0.0f));
+}
+
