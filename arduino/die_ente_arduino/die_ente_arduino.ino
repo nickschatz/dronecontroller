@@ -52,10 +52,10 @@ void setup() {
 
   // Setup matrices
   K << 
-  -0.025503,  0.029283,  0.045606, -0.003534,  0.003077,  0.002510, 
    0.025503,  0.029283, -0.045606,  0.003534,  0.003077, -0.002510, 
-  -0.025503, -0.029283, -0.045606, -0.003534, -0.003077, -0.002510, 
-   0.025503, -0.029283,  0.045606,  0.003534, -0.003077,  0.002510;
+  -0.025503,  0.029283,  0.045606, -0.003534,  0.003077,  0.002510, 
+   0.025503, -0.029283,  0.045606,  0.003534, -0.003077,  0.002510, 
+  -0.025503, -0.029283, -0.045606, -0.003534, -0.003077, -0.002510;
   A << 
    1.000000, 0.000000, 0.000000,  0.005000, 0.000000, 0.000000, 
   0.000000,  1.000000, 0.000000, 0.000000,  0.005000, 0.000000, 
@@ -64,12 +64,12 @@ void setup() {
   0.000000, 0.000000, 0.000000, 0.000000,  1.000000, 0.000000, 
   0.000000, 0.000000, 0.000000, 0.000000, 0.000000,  1.000000;
   B << 
-  -0.172625,  0.172625, -0.172625,  0.172625, 
+   0.172625, -0.172625,  0.172625, -0.172625, 
    0.205230,  0.205230, -0.205230, -0.205230, 
-   0.258648, -0.258648, -0.258648,  0.258648, 
-  -69.049803,  69.049803, -69.049803,  69.049803, 
+  -0.258648,  0.258648,  0.258648, -0.258648, 
+   69.049803, -69.049803,  69.049803, -69.049803, 
    82.092120,  82.092120, -82.092120, -82.092120, 
-   103.459044, -103.459044, -103.459044,  103.459044;
+  -103.459044,  103.459044,  103.459044, -103.459044;
   L << 
    0.022000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 
   0.000000,  0.020000, 0.000000, 0.000000, 0.000000, 0.000000, 
@@ -133,6 +133,22 @@ float clamp(float sig, float cutoff) {
   return _min(_max(-cutoff, sig), cutoff);
 }
 
+float normalize_angle(float angle) {
+  angle = fmod(angle, 2*PI);
+  if (angle < 0) {
+    angle += 2*PI;
+  }
+  return angle;
+}
+
+float to_heading(float angle) {
+  angle = normalize_angle(angle);
+  if (angle > PI) {
+    angle -= 2 * PI;
+  }
+  return angle;
+}
+
 int power_to_us(float power) {
   if (power > 1) {
     power = 1;
@@ -180,9 +196,11 @@ void quat_update(float deltaa) {
   roll  = -atan2(2.0f * (*getQ() * *(getQ()+1) + *(getQ()+2) *
                 *(getQ()+3)), *getQ() * *getQ() - *(getQ()+1) * *(getQ()+1)
                 - *(getQ()+2) * *(getQ()+2) + *(getQ()+3) * *(getQ()+3));
+  yaw = to_heading(yaw);
+  pitch = to_heading(pitch);
+  roll = to_heading(roll);
   pitch *= RAD_TO_DEG;
   yaw   *= RAD_TO_DEG;
-  yaw   -= 0.2167;
   roll *= RAD_TO_DEG;
 }
 
@@ -288,7 +306,7 @@ void update_controller(struct motors *u) {
   Eigen::VectorXf y(6);
   y << yaw, pitch, roll, dyaw, dpitch, droll;
   Eigen::VectorXf r(6);
-  r << yaw, desired_angle.pitch, desired_angle.roll, dyaw, 0.0, 0.0;
+  r << desired_angle.yaw, desired_angle.pitch, desired_angle.roll, 0.0, 0.0, 0.0;
   Eigen::VectorXf u_vec;
 
   //Observer
@@ -379,7 +397,7 @@ void loop() {
       desired_angle.pitch = cpitch;
     }
   
-    if (now - last_debug > 500) {
+    if (now - last_debug > 100) {
       Serial.print(F(" yaw: "));
       Serial.print(x_hat(0));
       Serial.print(F(" pitch: "));
