@@ -16,6 +16,7 @@ Servo esc3;
 Servo esc4;
 
 MPU9250 myIMU(WIRE2, 0x68);
+Madgwick AHRSFilter;
 
 long last;
 long last_intr;
@@ -118,10 +119,12 @@ void setup() {
   myIMU.setAccelRange(MPU9250::ACCEL_RANGE_4G);
   myIMU.setGyroRange(MPU9250::GYRO_RANGE_500DPS);
   myIMU.enableDataReadyInterrupt();
+  myIMU.setSrd(9); // 1000 Hz / (1 + SRD) = 100 Hz
+  myIMU.setDlpfBandwidth(MPU9250::DLPF_BANDWIDTH_20HZ);
 
-  myIMU.setMagCalX(-0.76, 2.00);
-  myIMU.setMagCalY(14.49, 1.33);
-  myIMU.setMagCalZ(35.09, 0.57);
+  myIMU.setMagCalX(3.3300, 1.0008);
+  myIMU.setMagCalY(37.8650, 0.9320);
+  myIMU.setMagCalZ(1.0100, 1.0778);
   
   Serial.println(F("READY"));
   digitalWrite(STATUS_LED, HIGH);
@@ -134,17 +137,27 @@ float clamp(float sig, float cutoff) {
 }
 
 float normalize_angle(float angle) {
-  angle = fmod(angle, 2*PI);
+  angle = fmod(angle, 360);
   if (angle < 0) {
-    angle += 2*PI;
+    angle += 360;
   }
   return angle;
 }
 
+float sign(float x) {
+  if (x > 0) {
+    return 1.0;
+  }
+  if (x < 0) {
+    return -1.0;
+  }
+  return 1.0;
+}
+
 float to_heading(float angle) {
   angle = normalize_angle(angle);
-  if (angle > PI) {
-    angle -= 2 * PI;
+  if (angle > 180) {
+    angle = -(360 - angle);
   }
   return angle;
 }
@@ -166,7 +179,7 @@ int power_to_us(float power) {
 
 unsigned long last_imu = micros();
 void update_imu() {
-  myIMU.readSensor();
+  myIMU.readSensor(AHRSFilter);
   ax = myIMU.getAccelX_mss();
   ay = myIMU.getAccelY_mss();
   az = myIMU.getAccelZ_mss();
@@ -179,29 +192,15 @@ void update_imu() {
   dyaw = -gz;
   dpitch = -gx;
   droll = -gy;
+  yaw = to_heading(AHRSFilter.getYaw());
+  pitch = AHRSFilter.getPitch();
+  roll = AHRSFilter.getRoll();
+  float roll_sign = sign(roll);
+  roll = roll_sign * abs(180 - abs(roll));
   
   unsigned long noww = micros();
   float deltaa = ((float) (noww - last_imu)) / 1000000.0f;
   last_imu = noww;
-  quat_update(deltaa);
-}
-
-void quat_update(float deltaa) {
-  MadgwickQuaternionUpdate(ax, ay, -az, gx * DEG_TO_RAD, gy * DEG_TO_RAD, -gz * DEG_TO_RAD, mx, my, mz, deltaa);
-  yaw   = -atan2(2.0f * (*(getQ()+1) * *(getQ()+2) + *getQ() *
-                *(getQ()+3)), *getQ() * *getQ() + *(getQ()+1) * *(getQ()+1)
-                - *(getQ()+2) * *(getQ()+2) - *(getQ()+3) * *(getQ()+3));
-  pitch = asin(2.0f * (*(getQ()+1) * *(getQ()+3) - *getQ() *
-                *(getQ()+2)));
-  roll  = -atan2(2.0f * (*getQ() * *(getQ()+1) + *(getQ()+2) *
-                *(getQ()+3)), *getQ() * *getQ() - *(getQ()+1) * *(getQ()+1)
-                - *(getQ()+2) * *(getQ()+2) + *(getQ()+3) * *(getQ()+3));
-  yaw = to_heading(yaw);
-  pitch = to_heading(pitch);
-  roll = to_heading(roll);
-  pitch *= RAD_TO_DEG;
-  yaw   *= RAD_TO_DEG;
-  roll *= RAD_TO_DEG;
 }
 
 void complementary_update(float deltaa) {
@@ -353,7 +352,7 @@ void loop() {
   update_imu();
   long now = millis();
   long delta = now - last_intr;
-  if (delta >= 5) {
+  if (delta >= 2) {
     last_intr = now;
     dt = (float) delta / 1000.0;
     
@@ -366,15 +365,6 @@ void loop() {
   
     if (has_data) {
       last_packet = millis();
-      /*Serial.print(in_yaw);
-      Serial.print(F(" P: "));
-      Serial.print(in_pitch);
-      Serial.print(F(" R: "));
-      Serial.print(in_roll);
-      Serial.print(F(" T: "));
-      Serial.print(in_throttle);
-      Serial.print(F(" S: "));
-      Serial.println(special);*/
       if (abs(in_throttle) < 20) {
         in_throttle = 0;
       }
@@ -399,11 +389,11 @@ void loop() {
   
     if (now - last_debug > 100) {
       Serial.print(F(" yaw: "));
-      Serial.print(x_hat(0));
+      Serial.print(yaw);
       Serial.print(F(" pitch: "));
-      Serial.print(x_hat(1));
+      Serial.print(pitch);
       Serial.print(F(" roll: "));
-      Serial.println(x_hat(2));
+      Serial.println(roll);
       if (is_low_voltage()) {
         //Serial.println("!!! LOW VOLTAGE !!!");
       }
