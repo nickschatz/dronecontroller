@@ -9,7 +9,8 @@
 // 13.2 / 4095
 // Small fudge for variances in resistors
 #define VOLTAGE_SCALE 0.00322344322
-#define STOP 255
+#define STOP B11111111
+#define DAVG_COUNT 50
 #define RAD_TO_DEG 57.2957795
 #define DEG_TO_RAD 0.017453292
 

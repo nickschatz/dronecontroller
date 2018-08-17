@@ -20,19 +20,16 @@ Madgwick AHRSFilter;
 
 long last;
 long last_intr;
-
-float yaw_offset;
-float pitch_offset;
-float roll_offset;
-
 float dt = 0;
-float ax, ay, az;
-float gx, gy, gz;
-float mx, my, mz;
 float yaw, pitch, roll;
 float dyaw, dpitch, droll;
-float _ayaw, _apitch, _aroll;
-float _gyaw, _gpitch, _groll;
+float lyaw = 0, lpitch = 0, lroll = 0;
+float* avgdyaw = new float[DAVG_COUNT];
+float* avgdpitch = new float[DAVG_COUNT];
+float* avgdroll = new float[DAVG_COUNT];
+byte avgd_pt = 0;
+float yaw_offset, pitch_offset, roll_offset;
+float _rroll, _ryaw, _rpitch;
 
 Eigen::MatrixXf K(4, 6);
 Eigen::MatrixXf A(6, 6);
@@ -41,6 +38,8 @@ Eigen::MatrixXf L(6, 6);
 Eigen::VectorXf x_hat(6);
 Eigen::VectorXf y_hat(6);
 Eigen::VectorXf u_last(4);
+
+HardwareTimer imuTimer(1);
 
 float _min(float a, float b);
 float _max(float a, float b);
@@ -53,24 +52,24 @@ void setup() {
 
   // Setup matrices
   K << 
-   0.054419,  0.069447, -0.112244,  0.007390,  0.007095, -0.005849, 
-  -0.054419,  0.069447,  0.112244, -0.007390,  0.007095,  0.005849, 
-   0.054419, -0.069447,  0.112244,  0.007390, -0.007095,  0.005849, 
-  -0.054419, -0.069447, -0.112244, -0.007390, -0.007095, -0.005849;
+   0.025503,  0.042652, -0.034232,  0.003534,  0.003063, -0.002457, 
+  -0.025503,  0.042652,  0.034232, -0.003534,  0.003063,  0.002457, 
+   0.025503, -0.042652,  0.034232,  0.003534, -0.003063,  0.002457, 
+  -0.025503, -0.042652, -0.034232, -0.003534, -0.003063, -0.002457;
   A << 
-   1.000000, 0.000000, 0.000000,  0.002000, 0.000000, 0.000000, 
-  0.000000,  1.000000, 0.000000, 0.000000,  0.002000, 0.000000, 
-  0.000000, 0.000000,  1.000000, 0.000000, 0.000000,  0.002000, 
+   1.000000, 0.000000, 0.000000,  0.005000, 0.000000, 0.000000, 
+  0.000000,  1.000000, 0.000000, 0.000000,  0.005000, 0.000000, 
+  0.000000, 0.000000,  1.000000, 0.000000, 0.000000,  0.005000, 
   0.000000, 0.000000, 0.000000,  1.000000, 0.000000, 0.000000, 
   0.000000, 0.000000, 0.000000, 0.000000,  1.000000, 0.000000, 
   0.000000, 0.000000, 0.000000, 0.000000, 0.000000,  1.000000;
   B << 
-   0.027620, -0.027620,  0.027620, -0.027620, 
-   0.032837,  0.032837, -0.032837, -0.032837, 
-  -0.041384,  0.041384,  0.041384, -0.041384, 
-   27.619921, -27.619921,  27.619921, -27.619921, 
-   32.836848,  32.836848, -32.836848, -32.836848, 
-  -41.383618,  41.383618,  41.383618, -41.383618;
+   0.172625, -0.172625,  0.172625, -0.172625, 
+   0.205230,  0.205230, -0.205230, -0.205230, 
+  -0.258648,  0.258648,  0.258648, -0.258648, 
+   69.049803, -69.049803,  69.049803, -69.049803, 
+   82.092120,  82.092120, -82.092120, -82.092120, 
+  -103.459044,  103.459044,  103.459044, -103.459044;
   L << 
    0.002200, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 
   0.000000,  0.002000, 0.000000, 0.000000, 0.000000, 0.000000, 
@@ -78,6 +77,8 @@ void setup() {
    1.000000, 0.000000, 0.000000,  0.001600, 0.000000, 0.000000, 
   0.000000,  1.000000, 0.000000, 0.000000,  0.001400, 0.000000, 
   0.000000, 0.000000,  1.000000, 0.000000, 0.000000,  0.001200;
+
+
 
   x_hat << 0,0,0,0,0,0;
   y_hat = x_hat;
@@ -91,6 +92,7 @@ void setup() {
      delay(400);
      digitalWrite(STATUS_LED, LOW);
   }
+  digitalWrite(STATUS_LED, LOW);
   #endif
   Serial.println(F("Starting..."));
   Serial.print(get_battery_voltage());
@@ -119,12 +121,26 @@ void setup() {
   myIMU.setAccelRange(MPU9250::ACCEL_RANGE_4G);
   myIMU.setGyroRange(MPU9250::GYRO_RANGE_500DPS);
   myIMU.enableDataReadyInterrupt();
-  myIMU.setSrd(9); // 1000 Hz / (1 + SRD) = 100 Hz
-  myIMU.setDlpfBandwidth(MPU9250::DLPF_BANDWIDTH_20HZ);
+  myIMU.setSrd(4); // 1000 Hz / (1 + SRD) = 200 Hz
+  myIMU.setDlpfBandwidth(MPU9250::DLPF_BANDWIDTH_41HZ);
 
   myIMU.setMagCalX(3.3300, 1.0008);
   myIMU.setMagCalY(37.8650, 0.9320);
   myIMU.setMagCalZ(1.0100, 1.0778);
+
+  AHRSFilter.begin(1000.0, 0.1);
+
+  imuTimer.setMode(TIMER_CH1, TIMER_OUTPUT_COMPARE);
+  imuTimer.pause();
+  imuTimer.setCount(0);
+  imuTimer.setPeriod(1000);
+  imuTimer.setCompare(TIMER_CH1, 0);
+  imuTimer.attachCompare1Interrupt(update_imu);
+  imuTimer.refresh();
+  imuTimer.resume();
+
+  //Serial.println("Waiting for Madgwick to stabilize (10s)");
+  //delay(10000);
   
   Serial.println(F("READY"));
   digitalWrite(STATUS_LED, HIGH);
@@ -177,76 +193,48 @@ int power_to_us(float power) {
   return (int) 480.0 * power + 1060;
 }
 
+unsigned long last_imu;
+float imu_dt;
 void update_imu() {
-  myIMU.readSensor(AHRSFilter);
-  ax = myIMU.getAccelX_mss();
-  ay = myIMU.getAccelY_mss();
-  az = myIMU.getAccelZ_mss();
-  gx = myIMU.getGyroX_rads() * RAD_TO_DEG;
-  gy = myIMU.getGyroY_rads() * RAD_TO_DEG;
-  gz = myIMU.getGyroZ_rads() * RAD_TO_DEG;
-  mx = myIMU.getMagX_uT();
-  my = myIMU.getMagY_uT();
-  mz = myIMU.getMagZ_uT();
-  dyaw = -gz;
-  dpitch = -gx;
-  droll = -gy;
-  yaw = to_heading(AHRSFilter.getYaw());
-  pitch = AHRSFilter.getPitch();
-  roll = AHRSFilter.getRoll();
-  float roll_sign = sign(roll);
-  roll = roll_sign * abs(180.0 - abs(roll));
-}
+  unsigned long imu_now = micros();
+  imu_dt = ((float) (imu_now - last_imu)) / 1000.0f;
+  last_imu = imu_now;
+  AHRSFilter.update(myIMU.getGyroX_rads(), myIMU.getGyroY_rads(), myIMU.getGyroZ_rads(), 
+                    myIMU.getAccelX_mss(), myIMU.getAccelY_mss(), myIMU.getAccelZ_mss(), 
+                    myIMU.getMagX_uT(), myIMU.getMagY_uT(), myIMU.getMagZ_uT());
+  _ryaw = AHRSFilter.getYaw();
+  _rpitch = -AHRSFilter.getPitch();
 
-void complementary_update(float deltaa) {
-  float r = 0.0;
-  float gr = 1.0 - r;
-  float grav;
-  float amag = sqrt(ax * ax + ay * ay + az * az);
-  if (amag > 0.0) {
-    _ayaw += atan2(ay, ax) * RAD_TO_DEG * deltaa;
-    _apitch += atan2(az, ay) * RAD_TO_DEG * deltaa;
-    _aroll += atan2(ax, az) * RAD_TO_DEG * deltaa;
+  _rroll = AHRSFilter.getRoll();
+  float roll_sign = sign(_rroll);
+  _rroll = -roll_sign * fabs(180.0 - fabs(_rroll));
+  yaw = to_heading(_ryaw - yaw_offset);
+  pitch = _rpitch - pitch_offset;
+  roll = _rroll - roll_offset;
+
+  float dts = imu_dt / 1000.0f;
+  float _dyaw = (yaw - lyaw) / dts;
+  float _dpitch = (pitch - lpitch) / dts;
+  float _droll = (roll - lroll) / dts;
+  dyaw = 0;
+  dpitch = 0;
+  droll = 0;
+  avgdyaw[avgd_pt] = _dyaw;
+  avgdpitch[avgd_pt] = _dpitch;
+  avgdroll[avgd_pt] = _droll;
+  avgd_pt = (avgd_pt + 1) % DAVG_COUNT;
+  for (int i = 0; i < DAVG_COUNT; i++) {
+    dyaw += avgdyaw[i];
+    dpitch += avgdpitch[i];
+    droll += avgdroll[i];
   }
-  _gyaw += gz * deltaa;
-  _gpitch += gx * deltaa;
-  _groll += gy * deltaa;
-
-  yaw = _gyaw * gr + _ayaw * r;
-  pitch = _gpitch * gr + _apitch * r;
-  roll = _groll * gr + _aroll * r;
-}
-
-
-void desaturate(struct motors *pows) {
-  // Rescale all to [min(pows), max(pows)]
-
-  // If all zeroes, then stop because we don't want constant spinning
-  if (pows->fr == 0.0 && pows->fl == 0.0 && pows->rl == 0.0 && pows->rr == 0.0) {
-    return;
-  }
-  float minpow = _min(pows->fr, _min(pows->fl, _min(pows->rl, pows->rr)));
-  float maxpow = _max(pows->fr, _max(pows->fl, _max(pows->rl, pows->rr)));
-  // No need to do anything if it's already in acceptable range
-  if (maxpow <= 1.0 && minpow >= MIN_THROTTLE) {
-    return;
-  }
+  dyaw /= DAVG_COUNT;
+  dpitch /= DAVG_COUNT;
+  droll /= DAVG_COUNT;
   
-  float d = maxpow - minpow;
-  // Scale to between 0 and 1
-  pows->fr = (pows->fr - minpow) / d;
-  pows->fl = (pows->fl - minpow) / d;
-  pows->rl = (pows->rl - minpow) / d;
-  pows->rr = (pows->rr - minpow) / d;
-
-  // Rescale to min and max
-  float min_ = _max(minpow, MIN_THROTTLE);
-  float max_ = _min(maxpow, 1.0);
-  float d2 = max_ - min_;
-  pows->fr = pows->fr * d2 + min_;
-  pows->fl = pows->fl * d2 + min_;
-  pows->rl = pows->rl * d2 + min_;
-  pows->rr = pows->rr * d2 + min_;
+  lyaw = yaw;
+  lpitch = pitch;
+  lroll = roll;
 }
 
 float get_battery_voltage() {
@@ -273,14 +261,14 @@ bool serial_read(int8_t* in_yaw, int8_t* in_pitch, int8_t* in_roll, int8_t* in_t
   unsigned long count = 0;
   byte buf_ptr = 0;
   byte last_read = 0;
-  while (last_read != STOP) {
+  while (!(last_read == STOP && count >= 6)) {
     last_read = SERIAL.read();
     
     read_buf[buf_ptr] = last_read;
-    count++;
     buf_ptr = (buf_ptr + 1) % 6;
+    count++;
   }
-  buf_ptr = (buf_ptr - 1) % 6;
+  buf_ptr = (buf_ptr == 0 ? 5 : buf_ptr - 1);
   // Read forwards
   *in_yaw = read_buf[buf_ptr];
   buf_ptr = (buf_ptr + 1) % 6;
@@ -310,7 +298,7 @@ void update_controller(struct motors *u) {
   // Controller
   u_vec = K*(r - x_hat);
   for (int i = 0; i < 4; i++) {
-    u_vec(i) = _min(_max(u_vec(i), 0.0), 1.0);
+    //u_vec(i) = _min(_max(u_vec(i), 0.0), 1.0);
   }
   u_last = u_vec;
   u->fr = u_vec(0);
@@ -343,14 +331,14 @@ long last_debug = 0;
 
 float throttle = 0.0;
 
-
+int control_ct = 0;
 void loop() {
   unsigned long noww = micros();
   float delta = ((float) (noww - last_intr)) / 1000.0f;
-  if (delta >= 2) {
-    update_imu();
+  if (delta >= 5) {
     last_intr = noww;
-    
+
+    myIMU.readSensor();
     int8_t in_yaw;
     int8_t in_pitch;
     int8_t in_roll;
@@ -372,6 +360,12 @@ void loop() {
       if (abs(in_roll) < 10) {
         in_roll = 0;
       }
+      if (special & 1) {
+        yaw_offset = _ryaw;
+        pitch_offset = _rpitch;
+        roll_offset = _rroll;
+        Serial.println(F("Zero YPR"));
+      }
   
       throttle = ((float) _min(_max(in_throttle, 0), 127)) / 127.0;
       float cyaw = 10 * ((float) in_yaw) / 127.0;
@@ -383,13 +377,12 @@ void loop() {
     }
   
     if (noww - last_debug > 100) {
-      /*Serial.print(F(" yaw: "));
-      Serial.print(yaw);
+      Serial.print(F("yaw: "));
+      Serial.print(roll);
       Serial.print(F(" pitch: "));
       Serial.print(pitch);
       Serial.print(F(" roll: "));
-      Serial.println(roll);*/
-      Serial.println(delta);
+      Serial.println(roll);
       if (is_low_voltage()) {
         //Serial.println("!!! LOW VOLTAGE !!!");
       }

@@ -38,7 +38,7 @@ while True:
     pitch = int(127 * ry)
     roll = int(127 * rx)
     throttle = int(127 * y)
-    special = 0 | reset
+    special = reset
     
     if ready:
         data = b''.join(map(lambda d: d.to_bytes(1, "big", signed=True), [yaw, pitch, roll, throttle, special, -128]))
