@@ -6,12 +6,12 @@ uart = UART(0, 9600, timeout=0)
 
 def handle(client):
     while True:
-        data = client.recv(5)
+        data = client.recv(6)
         if data == b'':
             break
         uart.write(data)
-        # ard_return = uart.read()
-        # client.send(ard_return)
+        ard_return = uart.read()
+        client.send(ard_return)
 
 if __name__ == '__main__':
     HOST = ""

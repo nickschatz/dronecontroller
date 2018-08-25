@@ -1,22 +1,11 @@
 import network
-import webrepl
 import time
-import secure
+import uos
 
+# webrepl pw "ente"
 
-webrepl.start()
+uos.dupterm(None, 1)  # Disable the REPL so that we can use uart
 
-# For debugging, connect to my home network
-wlan = network.WLAN(network.STA_IF) # create station interface
+wlan = network.WLAN(network.AP_IF)
+wlan.config(essid="Die Ente 0", authmode=network.AUTH_WPA_WPA2_PSK, password="vogel000")
 wlan.active(True)       # activate the interface
-wlan.connect(secure.SSID, secure.wifi_pass) # connect to an AP
-
-wait = 30
-count = 0
-while not wlan.isconnected() and count < wait:
-    # print(".", end="")
-    count += 1
-    time.sleep(1)
-
-
-# print("IP: {}".format(wlan.ifconfig()[0]))
