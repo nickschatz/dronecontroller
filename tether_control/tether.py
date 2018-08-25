@@ -1,6 +1,6 @@
 #!/usr/bin/python
 
-import pygame, serial, os
+import pygame, serial, os, time
 
 
 def to2s(i):
@@ -50,3 +50,5 @@ while True:
         if resp == "READY\r\n":
             ready = True
         print(resp, end="")
+
+    time.sleep(20 / 1000)  # Sleep 20 ms to let stm32 catch up

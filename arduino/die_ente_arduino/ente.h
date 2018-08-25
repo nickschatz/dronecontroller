@@ -5,11 +5,12 @@
 #define VIN_READ PA5
 #define CAL_COUNTS 50
 #define MIN_THROTTLE 0.2
-#define TETHER_CMD 1
+#define TETHER_CMD 0
+#define DEBUG 0
 // 13.2 / 4095
 // Small fudge for variances in resistors
 #define VOLTAGE_SCALE 0.00322344322
-#define STOP B11111111
+#define STOP -128
 #define DAVG_COUNT 50
 #define RAD_TO_DEG 57.2957795
 #define DEG_TO_RAD 0.017453292
@@ -41,5 +42,17 @@ struct motors {
   float rl;
   float rr;
 };
+
+#if TETHER_CMD
+#define SERIAL Serial
+#else
+#define SERIAL Serial2
+#endif
+
+#if DEBUG
+#define SERIALD Serial
+#else
+#define SERIALD Serial2
+#endif
 
 #endif

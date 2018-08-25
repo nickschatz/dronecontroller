@@ -2,16 +2,21 @@ import socket
 import sys
 from machine import UART
 
-uart = UART(0, 9600, timeout=0)
+uart = UART(0, 230400, timeout=0)
+
+def debug_send(data):
+    client.send(data)
 
 def handle(client):
     while True:
         data = client.recv(6)
-        if data == b'':
-            break
         uart.write(data)
-        ard_return = uart.read()
-        client.send(ard_return)
+        if uart.any() > 0:
+            ard_return = uart.read()
+            if b'\x03' in ard_return:
+                debug_send(b"Got stop command from drone\n")
+                raise KeyboardInterrupt
+            debug_send(ard_return)
 
 if __name__ == '__main__':
     HOST = ""
@@ -23,5 +28,5 @@ if __name__ == '__main__':
     # print("Starting drone server")
     while True:
         client, address = server.accept()
-        # print("Connection from {}".format(address))
+        # debug_send("Connection from {}\n".format(address))
         handle(client)

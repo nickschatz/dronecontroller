@@ -48,14 +48,14 @@ float _max(float a, float b);
 void setup() {
   pinMode(STATUS_LED, OUTPUT);
   digitalWrite(STATUS_LED, LOW);
-  pinMode(VIN_READ, INPUT);
+  pinMode(VIN_READ, INPUT_ANALOG);
 
   // Setup matrices
   K << 
-   0.025503,  0.042652, -0.034232,  0.003534,  0.003063, -0.002457, 
-  -0.025503,  0.042652,  0.034232, -0.003534,  0.003063,  0.002457, 
-   0.025503, -0.042652,  0.034232,  0.003534, -0.003063,  0.002457, 
-  -0.025503, -0.042652, -0.034232, -0.003534, -0.003063, -0.002457;
+   0.025503,  0.020031, -0.034232,  0.003534,  0.002783, -0.002457, 
+  -0.025503,  0.020031,  0.034232, -0.003534,  0.002783,  0.002457, 
+   0.025503, -0.020031,  0.034232,  0.003534, -0.002783,  0.002457, 
+  -0.025503, -0.020031, -0.034232, -0.003534, -0.002783, -0.002457;
   A << 
    1.000000, 0.000000, 0.000000,  0.005000, 0.000000, 0.000000, 
   0.000000,  1.000000, 0.000000, 0.000000,  0.005000, 0.000000, 
@@ -78,13 +78,11 @@ void setup() {
   0.000000,  1.000000, 0.000000, 0.000000,  0.001400, 0.000000, 
   0.000000, 0.000000,  1.000000, 0.000000, 0.000000,  0.001200;
 
-
-
   x_hat << 0,0,0,0,0,0;
   y_hat = x_hat;
   
   Serial.begin(230400);
-  Serial2.begin(9600);
+  Serial2.begin(230400);
   #if TETHER_CMD
   while (!Serial.isConnected()) {
      delay(200);
@@ -94,9 +92,9 @@ void setup() {
   }
   digitalWrite(STATUS_LED, LOW);
   #endif
-  Serial.println(F("Starting..."));
-  Serial.print(get_battery_voltage());
-  Serial.println("V");
+  SERIALD.println(F("Starting..."));
+  SERIALD.print(get_battery_voltage());
+  SERIALD.println("V");
 
   pinMode(PB1, PWM);
   pinMode(PB0, PWM);
@@ -111,11 +109,11 @@ void setup() {
   esc3.writeMicroseconds(1060);
   esc4.writeMicroseconds(1060);
 
-  Serial.println(F("Wrote initial to ESCs"));
+  SERIALD.println(F("Wrote initial to ESCs"));
   int status = myIMU.begin();
   if (status < 0) {
-    Serial.print("Failed to connect to MPU9255: ");
-    Serial.println(status);
+    SERIALD.print("Failed to connect to MPU9255: ");
+    SERIALD.println(status);
     while (1);
   }
   myIMU.setAccelRange(MPU9250::ACCEL_RANGE_4G);
@@ -139,10 +137,10 @@ void setup() {
   imuTimer.refresh();
   imuTimer.resume();
 
-  //Serial.println("Waiting for Madgwick to stabilize (10s)");
-  //delay(10000);
-  
-  Serial.println(F("READY"));
+  SERIALD.println("Waiting for Madgwick to stabilize (15s)");
+  delay(15000);
+  clearSerial(&SERIAL);
+  SERIALD.println(F("READY"));
   digitalWrite(STATUS_LED, HIGH);
   last = millis();
   last_intr = millis();
@@ -243,30 +241,35 @@ float get_battery_voltage() {
 
 bool is_low_voltage() {
   float vin = get_battery_voltage();
-  return vin < 10.0f;
+  return vin < 11.1f;
+}
+
+void clearSerial(Stream * handle) {
+  while (handle->read() != -1) {}
 }
 
 int8_t* read_buf = new int8_t[6];
 bool serial_read(int8_t* in_yaw, int8_t* in_pitch, int8_t* in_roll, int8_t* in_throttle, int8_t* special) {
   
-  #if TETHER_CMD
-  #define SERIAL Serial
-  #else
-  #define SERIAL Serial2
-  #endif
   if (SERIAL.available() < 6) {
+    //Serial.println("No data");
     return false;
   }
   // Read bytes until the last one read is STOP and I've read at least 6 total
   unsigned long count = 0;
   byte buf_ptr = 0;
-  byte last_read = 0;
+  int8_t last_read = 0;
   while (!(last_read == STOP && count >= 6)) {
     last_read = SERIAL.read();
     
     read_buf[buf_ptr] = last_read;
     buf_ptr = (buf_ptr + 1) % 6;
     count++;
+
+    // Stop if we've recieved 12 bytes without a stop byte, because that's bad and could freeze the quad, which is generally a bad thing
+    if (count > 12) {
+      return false;
+    }
   }
   buf_ptr = (buf_ptr == 0 ? 5 : buf_ptr - 1);
   // Read forwards
@@ -279,7 +282,8 @@ bool serial_read(int8_t* in_yaw, int8_t* in_pitch, int8_t* in_roll, int8_t* in_t
   *in_throttle = read_buf[buf_ptr];
   buf_ptr = (buf_ptr + 1) % 6;
   *special = read_buf[buf_ptr];
-  
+
+  // Only take the freshest data
   return true;
 }
 
@@ -327,7 +331,7 @@ void add_throttle(struct motors *u, float throttle) {
 
 
 long last_packet = 0;
-long last_debug = 0;
+unsigned long last_debug = 0;
 
 float throttle = 0.0;
 
@@ -339,12 +343,13 @@ void loop() {
     last_intr = noww;
 
     myIMU.readSensor();
-    int8_t in_yaw;
-    int8_t in_pitch;
-    int8_t in_roll;
-    int8_t in_throttle;
-    int8_t special;
+    int8_t in_yaw = 0;
+    int8_t in_pitch = 0;
+    int8_t in_roll = 0;
+    int8_t in_throttle = 0;
+    int8_t special = 0;
     bool has_data = serial_read(&in_yaw, &in_pitch, &in_roll, &in_throttle, &special);
+    bool debug = noww - last_debug > 200000;
   
     if (has_data) {
       last_packet = millis();
@@ -364,7 +369,7 @@ void loop() {
         yaw_offset = _ryaw;
         pitch_offset = _rpitch;
         roll_offset = _rroll;
-        Serial.println(F("Zero YPR"));
+        //Serial.println(F("Zero YPR"));
       }
   
       throttle = ((float) _min(_max(in_throttle, 0), 127)) / 127.0;
@@ -376,16 +381,21 @@ void loop() {
       desired_angle.pitch = cpitch;
     }
   
-    if (noww - last_debug > 100) {
-      Serial.print(F("yaw: "));
-      Serial.print(roll);
-      Serial.print(F(" pitch: "));
-      Serial.print(pitch);
-      Serial.print(F(" roll: "));
-      Serial.println(roll);
+    if (debug) {
+      SERIALD.print(F(" yaw: "));
+      SERIALD.print(yaw);
+      SERIALD.print(F(" pitch: "));
+      SERIALD.print(pitch);
+      SERIALD.print(F(" roll: "));
+      SERIALD.print(roll);
+      SERIALD.print(" bat: ");
+      SERIALD.println(get_battery_voltage());
       if (is_low_voltage()) {
-        //Serial.println("!!! LOW VOLTAGE !!!");
+        SERIALD.println("!!! LOW VOLTAGE !!!");
       }
+      
+    }
+    if (debug) {
       last_debug = noww;
     }
   
@@ -428,106 +438,3 @@ float _max(float a, float b) {
   }
   return b;
 }
-
-void magcal() {
-  Serial.println("Mag Calibration: Wave device in a figure eight until done!");
-  delay(4000);
-  myIMU.calibrateMag();
-  Serial.print(" Offset X: ");
-  Serial.print(myIMU.getMagBiasX_uT());
-  Serial.print(" Offset Y: ");
-  Serial.print(myIMU.getMagBiasY_uT());
-  Serial.print(" Offset Z: ");
-  Serial.println(myIMU.getMagBiasZ_uT());
-  Serial.print("Scale X: ");
-  Serial.print(myIMU.getMagScaleFactorX());
-  Serial.print(" Scale Y: ");
-  Serial.print(myIMU.getMagScaleFactorY());
-  Serial.print(" Scale Z: ");
-  Serial.println(myIMU.getMagScaleFactorZ());
-  Serial.println("Mag Calibration done!");
-}
-
-void acccal() {
-  Serial.println("Accel Calibration: Move to X up (5s)");
-  delay(5000);
-  myIMU.calibrateAccel();
-  Serial.print(" Offset X: ");
-  Serial.print(myIMU.getAccelBiasX_mss());
-  Serial.print(" Scale X: ");
-  Serial.println(myIMU.getAccelScaleFactorX());
-  
-  Serial.println("Accel Calibration: Move to X down (5s)");
-  delay(5000);
-  myIMU.calibrateAccel();
-  Serial.print(" Offset X: ");
-  Serial.print(myIMU.getAccelBiasX_mss());
-  Serial.print(" Scale X: ");
-  Serial.println(myIMU.getAccelScaleFactorX());
-
-  Serial.println("Accel Calibration: Move to Y up (5s)");
-  delay(5000);
-  myIMU.calibrateAccel();
-  Serial.print(" Offset Y: ");
-  Serial.print(myIMU.getAccelBiasY_mss());
-  Serial.print(" Scale Y: ");
-  Serial.println(myIMU.getAccelScaleFactorY());
-
-  Serial.println("Accel Calibration: Move to Y down (5s)");
-  delay(5000);  
-  myIMU.calibrateAccel();
-  Serial.print(" Offset Y: ");
-  Serial.print(myIMU.getAccelBiasY_mss());
-  Serial.print(" Scale Y: ");
-  Serial.println(myIMU.getAccelScaleFactorY());
-
-  Serial.println("Accel Calibration: Move to Z down (5s)");
-  delay(5000);  
-  Serial.print(" Offset Z: ");
-  Serial.print(myIMU.getAccelBiasZ_mss());  
-  Serial.print(" Scale Z: ");
-  Serial.println(myIMU.getAccelScaleFactorZ());
-
-  Serial.println("Accel Calibration: Move to Z up (5s)");
-  delay(5000);  
-  Serial.print(" Offset Z: ");
-  Serial.print(myIMU.getAccelBiasZ_mss());  
-  Serial.print(" Scale Z: ");
-  Serial.println(myIMU.getAccelScaleFactorZ());
-  
-  Serial.println("Accel Calibration done!");
-}
-void acccal2() {
-  Serial.println("Accel Calibration: Move around");
-  delay(5000);
-  myIMU.calibrateAccel();
-  Serial.print(" Offset X: ");
-  Serial.print(myIMU.getAccelBiasX_mss());
-  Serial.print(" Scale X: ");
-  Serial.println(myIMU.getAccelScaleFactorX());
-  Serial.print(" Offset Y: ");
-  Serial.print(myIMU.getAccelBiasY_mss());
-  Serial.print(" Scale Y: ");
-  Serial.println(myIMU.getAccelScaleFactorY());
-  Serial.print(" Offset Z: ");
-  Serial.print(myIMU.getAccelBiasZ_mss());  
-  Serial.print(" Scale Z: ");
-  Serial.println(myIMU.getAccelScaleFactorZ());
-  
-  Serial.println("Accel Calibration done!");
-}
-void esctest() {
-  esc1.writeMicroseconds(power_to_us(0.2f));
-  delay(500);
-  esc1.writeMicroseconds(power_to_us(0.0f));
-  esc2.writeMicroseconds(power_to_us(0.2f));
-  delay(500);
-  esc2.writeMicroseconds(power_to_us(0.0f));
-  esc3.writeMicroseconds(power_to_us(0.2f));
-  delay(500);
-  esc3.writeMicroseconds(power_to_us(0.0f));
-  esc4.writeMicroseconds(power_to_us(0.2f));
-  delay(500);
-  esc4.writeMicroseconds(power_to_us(0.0f));
-}
-
