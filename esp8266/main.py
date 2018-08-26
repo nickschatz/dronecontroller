@@ -1,16 +1,22 @@
 import socket
+import select
 import sys
 from machine import UART
 
 uart = UART(0, 230400, timeout=0)
 
 def debug_send(data):
-    client.send(data)
+    client.sendall(data)
 
 def handle(client):
     while True:
-        data = client.recv(6)
-        uart.write(data)
+        # Use select to keep this from blocking and clogging the uart reads
+        readable, _, _ = select.select([client], [], [])
+        if client in readable:
+            data = client.recv(16)
+            if len(data) == 0:
+                break
+            uart.write(data)
         if uart.any() > 0:
             ard_return = uart.read()
             if b'\x03' in ard_return:
